@@ -4,6 +4,7 @@ use tracing::{info, warn, error};
 use tracing_subscriber;
 use std::fs::File;
 use anyhow::Result;
+use oci_spec::distribution::RepositoryListBuilder;
 
 mod packfile;
 
@@ -41,6 +42,10 @@ fn main() -> Result<()> {
 
     // TODO Use the Mojang version API to get the Java version, for now assume 17
     // TODO Allow image override
+    let base_image = "cgr.dev/chainguard/jre:openjdk-jre-17";
+    let list = RepositoryListBuilder::default()
+            .repositories(vec!["cgr.dev/chainguard/jre".to_owned()])
+            .build()?;
 
     // download resources (multithread?)
     // unpack overrides & server overrides
