@@ -1,10 +1,15 @@
+use anyhow::bail;
 use clap::Parser;
-use oci_spec::distribution::RepositoryListBuilder;
+use futures_util::StreamExt;
+use std::io::Write;
+use std::env;
 use std::fs::File;
 use std::path::Path;
 use thiserror::Error;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber;
+use crypto::digest::Digest;
+use crypto::sha2::Sha256;
 
 mod packfile;
 
@@ -26,6 +31,26 @@ fn parse_image_name(image_name: String) -> Result<(url::Url, String), ImageNameP
         url::Url::parse("https://whatever").map_err(|_| ImageNameParseError { image_name })?,
         "foo".to_string(),
     ))
+}
+
+#[derive(Debug, Error)]
+pub enum RegistryError {
+    #[error("got error from registry")]
+    ErrorResponse(oci_spec::distribution::ErrorResponse),
+    #[error("JSON parse error")]
+    ParseError(serde_json::Error),
+}
+
+fn parse_registry_response<'a, T: serde::Deserialize<'a>>(
+    raw: &'a [u8],
+) -> Result<T, RegistryError> {
+    match serde_json::from_slice(&raw) {
+        Ok(r) => Ok(r),
+        Err(e) => match serde_json::from_slice(&raw) {
+            Ok(er) => Err(RegistryError::ErrorResponse(er)),
+            Err(_) => Err(RegistryError::ParseError(e)),
+        },
+    }
 }
 
 #[tokio::main]
@@ -59,36 +84,39 @@ async fn main() -> anyhow::Result<()> {
     // TODO Use the Mojang version API to get the Java version, for now assume 17
     // TODO Allow image override
     let client = reqwest::Client::new();
-    let raw_resp = client
+    let index_bytes = client
         .get("https://cgr.dev/v2/chainguard/jre/manifests/openjdk-jre-17")
         .header("Accept", "application/vnd.oci.image.index.v1+json")
         .send()
+        .await?
+        .bytes()
         .await?;
-    let raw_bytes = &raw_resp.bytes().await?;
-    let response_body = std::str::from_utf8(raw_bytes)?;
-
-    let index: oci_spec::image::ImageIndex = match serde_json::from_str(response_body) {
+    let index: oci_spec::image::ImageIndex = match parse_registry_response(&index_bytes) {
         Ok(i) => i,
-        Err(_) => {
-            // Oh... maybe it's an error instead?
-            let error_response: oci_spec::distribution::ErrorResponse =
-                serde_json::from_str(response_body)?;
-            for error in error_response.errors() {
-                error!(
-                    error_code = format!("{:?}", error.code()),
-                    error_message = error.message(),
-                    error_detail = error.detail(),
-                    "Encountered error from registry"
-                );
+        Err(e) => match e {
+            RegistryError::ErrorResponse(er) => {
+                for error in er.errors() {
+                    error!(
+                        error_code = format!("{:?}", error.code()),
+                        error_message = error.message(),
+                        error_detail = error.detail(),
+                        "Encountered error from registry"
+                    );
+                }
+                bail!("error from registry");
             }
-            anyhow::bail!("Error from container registry")
-        }
+            RegistryError::ParseError(pe) => {
+                error!("couldn't parse JSON");
+                bail!(pe)
+            }
+        },
     };
+
     println!("{:#?}", index);
     // TODO Support platforms other than Amd64
     let os = oci_spec::image::Os::Linux;
     let arch = oci_spec::image::Arch::Amd64;
-    let manifest = match index.manifests().into_iter().find(|m| match m.platform() {
+    let description = match index.manifests().into_iter().find(|m| match m.platform() {
         Some(p) => p.os() == &os && p.architecture() == &arch,
         None => false,
     }) {
@@ -98,10 +126,102 @@ async fn main() -> anyhow::Result<()> {
     info!(
         os = format!("{:?}", os),
         arch = format!("{:?}", arch),
-        digest = manifest.digest(),
+        digest = description.digest(),
         "Found manifest for os and arch"
     );
 
+    let manifest_bytes = client
+        // Oh I just love string templating user-provided data into a URL...
+        // TODO Don't.
+        .get("https://cgr.dev/v2/chainguard/jre/manifests/".to_owned() + description.digest())
+        .header("Accept", "application/vnd.oci.image.manifest.v1+json")
+        .send()
+        .await?
+        .bytes()
+        .await?;
+    let manifest: oci_spec::image::ImageManifest = match parse_registry_response(&manifest_bytes) {
+        Ok(i) => i,
+        Err(e) => match e {
+            RegistryError::ErrorResponse(er) => {
+                for error in er.errors() {
+                    error!(
+                        error_code = format!("{:?}", error.code()),
+                        error_message = error.message(),
+                        error_detail = error.detail(),
+                        "Encountered error from registry"
+                    );
+                }
+                bail!("error from registry");
+            }
+            RegistryError::ParseError(pe) => {
+                error!("couldn't parse JSON");
+                bail!(pe)
+            }
+        },
+    };
+    println!("{:#?}", manifest);
+
+    let config_bytes = client
+        // Oh I just love string templating user-provided data into a URL...
+        // TODO Don't.
+        .get("https://cgr.dev/v2/chainguard/jre/blobs/".to_owned() + manifest.config().digest())
+        .header("Accept", "application/vnd.oci.image.config.v1+json")
+        .send()
+        .await?
+        .bytes()
+        .await?;
+    println!("{:?}", config_bytes);
+    let config: oci_spec::image::ImageConfiguration = match parse_registry_response(&config_bytes) {
+        Ok(i) => i,
+        Err(e) => match e {
+            RegistryError::ErrorResponse(er) => {
+                for error in er.errors() {
+                    error!(
+                        error_code = format!("{:?}", error.code()),
+                        error_message = error.message(),
+                        error_detail = error.detail(),
+                        "Encountered error from registry"
+                    );
+                }
+                bail!("error from registry");
+            }
+            RegistryError::ParseError(pe) => {
+                error!("couldn't parse JSON");
+                bail!(pe)
+            }
+        },
+    };
+    println!("{:#?}", config);
+    // Grab all the images to a tmp directory
+    let dir = env::temp_dir();
+    info!(tmp_dir = format!("{:?}", dir), "Using temporary directory");
+
+    for layer in manifest.layers() {
+        info!(digest = layer.digest(), "Downloading layer");
+        let mut hasher = Sha256::new();
+        let layer_res = client
+            // Oh I just love string templating user-provided data into a URL...
+            // TODO Don't.
+            .get("https://cgr.dev/v2/chainguard/jre/blobs/".to_owned() + layer.digest())
+            .header("Accept", "application/vnd.oci.image.layer.v1.tar+gzip")
+            .send()
+            .await?;
+        let mut filepath = dir.clone();
+        filepath.push(layer.digest());
+        let mut file = File::create(filepath)?;
+        let mut stream = layer_res.bytes_stream();
+        while let Some(item) = stream.next().await {
+            let chunk = item?;
+            hasher.input(&chunk);
+            file.write_all(&chunk)?;
+        }
+        if *layer.digest() != "sha256:".to_owned() + &hasher.result_str() {
+            warn!(expected = layer.digest(), actual = hasher.result_str(), "Layer did not match digest!");
+        } else {
+            debug!(actual = hasher.result_str(), "Layer digest computed and matched");
+        }
+        info!(digest = layer.digest(), "Download complete");
+    }
     // download resources (multithread?)
     // unpack overrides & server overrides
     // download correct Wolfi jre image
