@@ -4,10 +4,12 @@ use futures_util::{Stream, StreamExt};
 use std::fs::File;
 use std::io::Write;
 
-pub async fn stream_to_file_and_hash<D: Digest, S: Stream<Item = reqwest::Result<Bytes>> + std::marker::Unpin>(
+pub async fn stream_to_file_and_hash<
+    S: Stream<Item = reqwest::Result<Bytes>> + std::marker::Unpin,
+>(
     mut stream: S,
     mut file: File,
-    digest: &mut D,
+    digest: &mut impl Digest,
 ) -> anyhow::Result<usize> {
     let mut total = 0;
     while let Some(item) = stream.next().await {

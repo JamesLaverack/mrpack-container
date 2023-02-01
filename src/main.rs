@@ -2,19 +2,18 @@ use anyhow::bail;
 use clap::Parser;
 use crypto::digest::Digest;
 use crypto::sha2::Sha256;
-use futures_util::StreamExt;
 use std::env;
 use std::fs;
 use std::fs::File;
-use std::io::Write;
 use std::path::Path;
 use tempfile::tempdir;
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber;
 
-mod packfile;
 mod download;
+mod fabric;
+mod packfile;
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -27,13 +26,6 @@ struct Args {
 #[error("image name '{image_name}' invalid")]
 pub struct ImageNameParseError {
     image_name: String,
-}
-
-fn parse_image_name(image_name: String) -> Result<(url::Url, String), ImageNameParseError> {
-    Ok((
-        url::Url::parse("https://whatever").map_err(|_| ImageNameParseError { image_name })?,
-        "foo".to_string(),
-    ))
 }
 
 #[derive(Debug, Error)]
@@ -78,10 +70,35 @@ async fn main() -> anyhow::Result<()> {
     let index: packfile::Index = serde_json::from_reader(index_file)?;
 
     info!(
+        path = "file://".to_owned() + &path.as_os_str().to_str().unwrap(),
         name = index.name,
         version = index.version_id,
-        "Loading modpack"
+        "Loaded Modrinth modpack file"
     );
+
+    // Make a temp dir which will be where we put everything that we're going to make on the
+    // filesystem in the container.
+    let dir = tempdir()?;
+    info!(
+        path = dir.path().as_os_str().to_str().unwrap(),
+        "Assembling Minecraft container layer"
+    );
+
+    let minecraft_dir = dir.path().join("opt").join("minecraft");
+    fs::create_dir_all(&minecraft_dir)?;
+    info!(
+        minecraft_dir = &minecraft_dir.as_os_str().to_str().unwrap(),
+        "Created Minecraft dir in container filesystem /opt/minecraft"
+    );
+
+    if let Some(fabric_version) = &index.dependencies.fabric_loader {
+        fabric::download_fabric(
+            minecraft_dir,
+            &index.dependencies.minecraft,
+            &fabric_version,
+        ).await?;
+    }
+
     // TODO Check we're using only valid download URLs
 
     // TODO Use the Mojang version API to get the Java version, for now assume 17
@@ -115,7 +132,6 @@ async fn main() -> anyhow::Result<()> {
         },
     };
 
-    println!("{:#?}", index);
     // TODO Support platforms other than Amd64
     let os = oci_spec::image::Os::Linux;
     let arch = oci_spec::image::Arch::Amd64;
@@ -162,7 +178,6 @@ async fn main() -> anyhow::Result<()> {
             }
         },
     };
-    println!("{:#?}", manifest);
 
     let config_bytes = client
         // Oh I just love string templating user-provided data into a URL...
@@ -173,7 +188,6 @@ async fn main() -> anyhow::Result<()> {
         .await?
         .bytes()
         .await?;
-    println!("{:?}", config_bytes);
     let config: oci_spec::image::ImageConfiguration = match parse_registry_response(&config_bytes) {
         Ok(i) => i,
         Err(e) => match e {
@@ -194,7 +208,6 @@ async fn main() -> anyhow::Result<()> {
             }
         },
     };
-    println!("{:#?}", config);
     // Grab all the images to a tmp directory
     let dir = env::temp_dir();
     info!(tmp_dir = format!("{:?}", dir), "Using temporary directory");
@@ -212,7 +225,8 @@ async fn main() -> anyhow::Result<()> {
         let mut filepath = dir.clone();
         filepath.push(layer.digest());
         let file = File::create(filepath)?;
-        download::stream_to_file_and_hash(layer_res.bytes_stream(), file, &mut hasher).await?;
+        download::stream_to_file_and_hash(layer_res.bytes_stream(), file, &mut hasher)
+            .await?;
         if *layer.digest() != "sha256:".to_owned() + &hasher.result_str() {
             warn!(
                 expected = layer.digest(),
