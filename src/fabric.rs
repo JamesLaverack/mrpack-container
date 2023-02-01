@@ -28,7 +28,7 @@ pub async fn download_fabric(
     info!(
         size_bytes = size,
         sha256 = hasher.result_str(),
-        path = path.as_os_str().to_str(),
+        path = "server.jar",
         installer_version = installer_version,
         minecraft_version = minecraft_version,
         fabric_version = fabric_version,

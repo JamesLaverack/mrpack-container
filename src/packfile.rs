@@ -1,4 +1,5 @@
 use serde::{Serialize, Deserialize};
+use url::Url;
 
 // Based on Modrinth documentation https://docs.modrinth.com/docs/modpacks/format_definition/
 
@@ -29,7 +30,7 @@ pub struct File {
     pub path: String,
     pub hashes: Hashes,
     pub env: Option<Env>,
-    pub downloads: Vec<url::Url>,
+    pub downloads: Vec<Url>,
     pub file_size: u64,
 }
 

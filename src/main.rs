@@ -2,6 +2,7 @@ use anyhow::bail;
 use clap::Parser;
 use crypto::digest::Digest;
 use crypto::sha2::Sha256;
+use crypto::sha2::Sha512;
 use std::env;
 use std::fs;
 use std::fs::File;
@@ -10,6 +11,7 @@ use tempfile::tempdir;
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber;
+use packfile::EnvType;
 
 mod download;
 mod fabric;
@@ -87,19 +89,68 @@ async fn main() -> anyhow::Result<()> {
     let minecraft_dir = dir.path().join("opt").join("minecraft");
     fs::create_dir_all(&minecraft_dir)?;
     info!(
-        minecraft_dir = &minecraft_dir.as_os_str().to_str().unwrap(),
-        "Created Minecraft dir in container filesystem /opt/minecraft"
+        minecraft_dir = "/opt/minecraft",
+        "Created Minecraft dir in container filesystem"
     );
 
     if let Some(fabric_version) = &index.dependencies.fabric_loader {
         fabric::download_fabric(
-            minecraft_dir,
+            minecraft_dir.clone(),
             &index.dependencies.minecraft,
             &fabric_version,
-        ).await?;
+        )
+        .await?;
     }
 
     // TODO Check we're using only valid download URLs
+    if let Some(files) = index.files {
+        for mrfile in files {
+            if let Some(env) = mrfile.env {
+                match env.server {
+                    EnvType::Required => {},
+                    EnvType::Optional => {
+                        info!(path = mrfile.path, "including optional server-side mod");
+                    },
+                    EnvType::Unsupported => {
+                        info!(path = mrfile.path, "skipping unsupported server-side mod");
+                            continue
+                    },
+                }
+            }
+            if mrfile.downloads.len() == 0 {
+                bail!("File had no provided download URLs")
+            }
+            let u = mrfile.downloads.get(0).unwrap().as_str();
+            let request = reqwest::get(u).await?;
+            let mut path = minecraft_dir.clone();
+            // TODO check for path injection here
+            path.push(&mrfile.path);
+            fs::create_dir_all(&path.parent().unwrap())?;
+            let file = File::create(&path)?;
+            let mut hasher = Sha512::new();
+            let size = download::stream_to_file_and_hash(request.bytes_stream(), file, &mut hasher)
+                .await?;
+            let mut checksum: [u8; 64] = [0; 64];
+            hasher.result(&mut checksum);
+            if checksum != mrfile.hashes.sha512 {
+                error!(
+                    expected_sha512 = hex::encode_upper(mrfile.hashes.sha512),
+                    actual_sha512 = hex::encode_upper(checksum),
+                    path = mrfile.path,
+                    url = u,
+                    "SHA512 checksum did not match!"
+                );
+                bail!("Checksum validation failure");
+            }
+            info!(
+                size_bytes = size,
+                sha512 = hasher.result_str(),
+                path = mrfile.path,
+                url = u,
+                "Downloaded file"
+            );
+        }
+    }
 
     // TODO Use the Mojang version API to get the Java version, for now assume 17
     // TODO Allow image override
@@ -225,8 +276,7 @@ async fn main() -> anyhow::Result<()> {
         let mut filepath = dir.clone();
         filepath.push(layer.digest());
         let file = File::create(filepath)?;
-        download::stream_to_file_and_hash(layer_res.bytes_stream(), file, &mut hasher)
-            .await?;
+        download::stream_to_file_and_hash(layer_res.bytes_stream(), file, &mut hasher).await?;
         if *layer.digest() != "sha256:".to_owned() + &hasher.result_str() {
             warn!(
                 expected = layer.digest(),
