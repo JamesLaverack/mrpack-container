@@ -1,17 +1,20 @@
 use anyhow::bail;
 use clap::Parser;
+use crypto::digest::Digest;
+use crypto::sha2::Sha256;
 use futures_util::StreamExt;
-use std::io::Write;
 use std::env;
+use std::fs;
 use std::fs::File;
+use std::io::Write;
 use std::path::Path;
+use tempfile::tempdir;
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber;
-use crypto::digest::Digest;
-use crypto::sha2::Sha256;
 
 mod packfile;
+mod download;
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -208,17 +211,19 @@ async fn main() -> anyhow::Result<()> {
             .await?;
         let mut filepath = dir.clone();
         filepath.push(layer.digest());
-        let mut file = File::create(filepath)?;
-        let mut stream = layer_res.bytes_stream();
-        while let Some(item) = stream.next().await {
-            let chunk = item?;
-            hasher.input(&chunk);
-            file.write_all(&chunk)?;
-        }
+        let file = File::create(filepath)?;
+        download::stream_to_file_and_hash(layer_res.bytes_stream(), file, &mut hasher).await?;
         if *layer.digest() != "sha256:".to_owned() + &hasher.result_str() {
-            warn!(expected = layer.digest(), actual = hasher.result_str(), "Layer did not match digest!");
+            warn!(
+                expected = layer.digest(),
+                actual = hasher.result_str(),
+                "Layer did not match digest!"
+            );
         } else {
-            debug!(actual = hasher.result_str(), "Layer digest computed and matched");
+            debug!(
+                actual = hasher.result_str(),
+                "Layer digest computed and matched"
+            );
         }
         info!(digest = layer.digest(), "Download complete");
     }

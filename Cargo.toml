@@ -19,3 +19,4 @@ tokio = { version = "1.24.2", features = ["full"] }
 thiserror = "1.0.38"
 futures-util = "0.3.25"
 rust-crypto = "0.2.36"
+bytes = "1.4.0"
