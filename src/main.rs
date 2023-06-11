@@ -3,6 +3,7 @@ use clap::Parser;
 use crypto::digest::Digest;
 use crypto::sha2::Sha256;
 use crypto::sha2::Sha512;
+use packfile::EnvType;
 use std::env;
 use std::fs;
 use std::fs::File;
@@ -11,7 +12,7 @@ use tempfile::tempdir;
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber;
-use packfile::EnvType;
+use std::io;
 
 mod download;
 mod fabric;
@@ -57,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     info!("Running MRContainer");
 
-    // Load the pack file and extract it 
+    // Load the pack file and extract it
     let path = Path::new(&args.mr_pack_file);
     if !path.exists() {
         anyhow::bail!("File not found");
@@ -68,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
     let index_file = match zipfile.by_name("modrinth.index.json") {
         Ok(file) => file,
         Err(_) => {
-            anyhow::bail!("Failed to find modrinth.index.json file in mrpack archive");
+            anyhow::bail!("Failed to find modrinth.index.json file in .mrpack archive");
         }
     };
     let index: packfile::Index = serde_json::from_reader(index_file)?;
@@ -105,14 +106,24 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     }
 
-    // Scan through for overrides, and apply them 
+    // Scan through for overrides, and apply them
     for i in 0..zipfile.len() {
-        let file = zipfile.by_index(i)?;
-        let _path = Path::new(file.name());
-        //if path.ov
-        // Translate
-        //
-        info!(filename = file.name(), "Found file in zip")
+        let mut file = zipfile.by_index(i)?;
+        if let Some(path) = file.enclosed_name() {
+            info!(filename = path.to_str().unwrap(), "Found file in zip");
+            if path.starts_with("overrides") {
+                let stripped_path = path.strip_prefix("overrides")?;
+                if file.is_file() {
+                    let new_filepath = minecraft_dir.join(stripped_path);
+                    if let Some(dirpath) = new_filepath.parent() {
+                        fs::create_dir_all(&dirpath)?;
+                    }
+                    let mut new_file = File::create(&new_filepath)?;
+                    info!(filename = path.to_str().unwrap(), unpacked = new_filepath.to_str().unwrap(), "Unpacked file");
+                    io::copy(&mut file, &mut new_file)?;
+                }
+            }
+        }
     }
 
     // TODO Check we're using only valid download URLs
@@ -120,14 +131,14 @@ async fn main() -> anyhow::Result<()> {
         for mrfile in files {
             if let Some(env) = mrfile.env {
                 match env.server {
-                    EnvType::Required => {},
+                    EnvType::Required => {}
                     EnvType::Optional => {
                         info!(path = mrfile.path, "including optional server-side mod");
-                    },
+                    }
                     EnvType::Unsupported => {
                         info!(path = mrfile.path, "skipping unsupported server-side mod");
-                            continue
-                    },
+                        continue;
+                    }
                 }
             }
             if mrfile.downloads.len() == 0 {
@@ -216,7 +227,10 @@ async fn main() -> anyhow::Result<()> {
     let manifest_bytes = client
         // Oh I just love string templating user-provided data into a URL...
         // TODO Don't.
-        .get("https://registry.hub.docker.com/v2/library/eclipse-temurin/manifests/".to_owned() + description.digest())
+        .get(
+            "https://registry.hub.docker.com/v2/library/eclipse-temurin/manifests/".to_owned()
+                + description.digest(),
+        )
         .header("Accept", "application/vnd.oci.image.manifest.v1+json")
         .send()
         .await?
@@ -246,7 +260,10 @@ async fn main() -> anyhow::Result<()> {
     let config_bytes = client
         // Oh I just love string templating user-provided data into a URL...
         // TODO Don't.
-        .get("https://registry.hub.docker.com/v2/library/eclipse-temurin/blobs".to_owned() + manifest.config().digest())
+        .get(
+            "https://registry.hub.docker.com/v2/library/eclipse-temurin/blobs".to_owned()
+                + manifest.config().digest(),
+        )
         .header("Accept", "application/vnd.oci.image.config.v1+json")
         .send()
         .await?
@@ -282,7 +299,10 @@ async fn main() -> anyhow::Result<()> {
         let layer_res = client
             // Oh I just love string templating user-provided data into a URL...
             // TODO Don't.
-            .get("https://registry.hub.docker.com/v2/library/eclipse-temurin/blobs".to_owned() + layer.digest())
+            .get(
+                "https://registry.hub.docker.com/v2/library/eclipse-temurin/blobs".to_owned()
+                    + layer.digest(),
+            )
             .header("Accept", "application/vnd.oci.image.layer.v1.tar+gzip")
             .send()
             .await?;
