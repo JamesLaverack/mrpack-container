@@ -52,10 +52,12 @@ fn parse_registry_response<'a, T: serde::Deserialize<'a>>(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Setup code
     let args = Args::parse();
-
     tracing_subscriber::fmt::init();
     info!("Running MRContainer");
+
+    // Load the pack file and extract it 
     let path = Path::new(&args.mr_pack_file);
     if !path.exists() {
         anyhow::bail!("File not found");
@@ -93,6 +95,7 @@ async fn main() -> anyhow::Result<()> {
         "Created Minecraft dir in container filesystem"
     );
 
+    // Get the executable, which will be a mod loader
     if let Some(fabric_version) = &index.dependencies.fabric_loader {
         fabric::download_fabric(
             minecraft_dir.clone(),
@@ -100,6 +103,16 @@ async fn main() -> anyhow::Result<()> {
             &fabric_version,
         )
         .await?;
+    }
+
+    // Scan through for overrides, and apply them 
+    for i in 0..zipfile.len() {
+        let file = zipfile.by_index(i)?;
+        let _path = Path::new(file.name());
+        //if path.ov
+        // Translate
+        //
+        info!(filename = file.name(), "Found file in zip")
     }
 
     // TODO Check we're using only valid download URLs
@@ -156,7 +169,7 @@ async fn main() -> anyhow::Result<()> {
     // TODO Allow image override
     let client = reqwest::Client::new();
     let index_bytes = client
-        .get("https://cgr.dev/v2/chainguard/jre/manifests/openjdk-jre-17")
+        .get("https://registry.hub.docker.com/v2/library/eclipse-temurin/manifests/17-jre-alpine")
         .header("Accept", "application/vnd.oci.image.index.v1+json")
         .send()
         .await?
@@ -203,7 +216,7 @@ async fn main() -> anyhow::Result<()> {
     let manifest_bytes = client
         // Oh I just love string templating user-provided data into a URL...
         // TODO Don't.
-        .get("https://cgr.dev/v2/chainguard/jre/manifests/".to_owned() + description.digest())
+        .get("https://registry.hub.docker.com/v2/library/eclipse-temurin/manifests/".to_owned() + description.digest())
         .header("Accept", "application/vnd.oci.image.manifest.v1+json")
         .send()
         .await?
@@ -233,7 +246,7 @@ async fn main() -> anyhow::Result<()> {
     let config_bytes = client
         // Oh I just love string templating user-provided data into a URL...
         // TODO Don't.
-        .get("https://cgr.dev/v2/chainguard/jre/blobs/".to_owned() + manifest.config().digest())
+        .get("https://registry.hub.docker.com/v2/library/eclipse-temurin/blobs".to_owned() + manifest.config().digest())
         .header("Accept", "application/vnd.oci.image.config.v1+json")
         .send()
         .await?
@@ -269,7 +282,7 @@ async fn main() -> anyhow::Result<()> {
         let layer_res = client
             // Oh I just love string templating user-provided data into a URL...
             // TODO Don't.
-            .get("https://cgr.dev/v2/chainguard/jre/blobs/".to_owned() + layer.digest())
+            .get("https://registry.hub.docker.com/v2/library/eclipse-temurin/blobs".to_owned() + layer.digest())
             .header("Accept", "application/vnd.oci.image.layer.v1.tar+gzip")
             .send()
             .await?;
