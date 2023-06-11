@@ -7,12 +7,12 @@ use packfile::EnvType;
 use std::env;
 use std::fs;
 use std::fs::File;
+use std::io;
 use std::path::Path;
 use tempfile::tempdir;
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber;
-use std::io;
 
 mod download;
 mod fabric;
@@ -49,6 +49,35 @@ fn parse_registry_response<'a, T: serde::Deserialize<'a>>(
             Err(_) => Err(RegistryError::ParseError(e)),
         },
     }
+}
+
+fn extract_overrides<R: std::io::Read + std::io::Seek>(
+    zipfile: &mut zip::ZipArchive<R>,
+    minecraft_dir: &std::path::Path,
+    overrides: &str,
+) -> anyhow::Result<()> {
+    for i in 0..zipfile.len() {
+        let mut file = zipfile.by_index(i)?;
+        if let Some(path) = file.enclosed_name() {
+            if path.starts_with(overrides) {
+                let stripped_path = path.strip_prefix(overrides)?;
+                if file.is_file() {
+                    let new_filepath = minecraft_dir.join(stripped_path);
+                    if let Some(dirpath) = new_filepath.parent() {
+                        fs::create_dir_all(&dirpath)?;
+                    }
+                    let mut new_file = File::create(&new_filepath)?;
+                    info!(
+                        filename = path.to_str().unwrap(),
+                        overrides = overrides,
+                        "Unpacked overrides file"
+                    );
+                    io::copy(&mut file, &mut new_file)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[tokio::main]
@@ -106,26 +135,6 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     }
 
-    // Scan through for overrides, and apply them
-    for i in 0..zipfile.len() {
-        let mut file = zipfile.by_index(i)?;
-        if let Some(path) = file.enclosed_name() {
-            info!(filename = path.to_str().unwrap(), "Found file in zip");
-            if path.starts_with("overrides") {
-                let stripped_path = path.strip_prefix("overrides")?;
-                if file.is_file() {
-                    let new_filepath = minecraft_dir.join(stripped_path);
-                    if let Some(dirpath) = new_filepath.parent() {
-                        fs::create_dir_all(&dirpath)?;
-                    }
-                    let mut new_file = File::create(&new_filepath)?;
-                    info!(filename = path.to_str().unwrap(), unpacked = new_filepath.to_str().unwrap(), "Unpacked file");
-                    io::copy(&mut file, &mut new_file)?;
-                }
-            }
-        }
-    }
-
     // TODO Check we're using only valid download URLs
     if let Some(files) = index.files {
         for mrfile in files {
@@ -175,7 +184,11 @@ async fn main() -> anyhow::Result<()> {
             );
         }
     }
+    extract_overrides(&mut zipfile, &minecraft_dir, "overrides")?;
+    extract_overrides(&mut zipfile, &minecraft_dir, "server-overrides")?;
 
+    info!("Assembled on filesystem");
+    std::thread::sleep(std::time::Duration::from_millis(10000));
     // TODO Use the Mojang version API to get the Java version, for now assume 17
     // TODO Allow image override
     let client = reqwest::Client::new();
