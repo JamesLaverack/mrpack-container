@@ -3,14 +3,19 @@
 A command line application that turns a Modrinth `.mrpack` file into a container OCI image.
 This container is for use on a container runtime such as Podman or Docker, or on an orchestrator such as Kubernetes.
 MRContainer can also push the resulting image to a container registry.
+
 This does not require any container runtime to run, and can be run inside of a container itself.
 No mod files or other scripts are executed as part of this operation.
 
-Note that you are responsible for adhering to the licensing requriements of the mod files invovled.
+You are responsible for adhering to the licensing requriements of the mod files invovled.
+This project is not affiliated with Modrinth.
 
 ## Building Images
 
-One, or both, of `--output-tar` and `--push-image` are required.
+You need a Modrinth format modpack file (i.e., a `.mrpack` file).
+You can find these on [Modrinth](https://modrinth.com/modpacks), or use [packwiz](https://packwiz.infra.link/) to convert other formats of modpack to the Modrinth format.
+
+the `--output-tar` flag is required to specify the output location for a container in TAR format.
 
 ```
 mrcontainer my-modpack.mrpack --output-tar image.tar
