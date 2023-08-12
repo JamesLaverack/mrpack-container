@@ -16,7 +16,7 @@ use tracing_subscriber;
 
 mod download;
 mod modloaders;
-use modloaders::{fabric};
+use modloaders::{fabric, quilt};
 mod packfile;
 
 #[derive(Parser)]
@@ -134,6 +134,8 @@ async fn main() -> anyhow::Result<()> {
             &fabric_version,
         )
         .await?;
+    } else if let Some(quilt_version) = &index.dependencies.quilt_loader {
+        quilt::download_quilt(minecraft_dir.clone(), "0.8.0").await?;
     }
 
     // TODO Check we're using only valid download URLs
