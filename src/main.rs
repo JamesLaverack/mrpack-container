@@ -16,7 +16,7 @@ use tracing_subscriber;
 
 mod download;
 mod modloaders;
-use modloaders::{fabric, quilt};
+use modloaders::{fabric, forge, quilt};
 mod packfile;
 
 #[derive(Parser)]
@@ -128,14 +128,29 @@ async fn main() -> anyhow::Result<()> {
 
     // Get the executable, which will be a mod loader
     if let Some(fabric_version) = &index.dependencies.fabric_loader {
+        let fabric_installer_version = "0.11.1";
+
         fabric::download_fabric(
             minecraft_dir.clone(),
+            &fabric_installer_version,
             &index.dependencies.minecraft,
             &fabric_version,
         )
         .await?;
-    } else if let Some(quilt_version) = &index.dependencies.quilt_loader {
-        quilt::download_quilt(minecraft_dir.clone(), "0.8.0").await?;
+    } else if let Some(_quilt_version) = &index.dependencies.quilt_loader {
+        let quilt_loader_version = "0.8.0";
+        quilt::download_quilt(minecraft_dir.clone(), &quilt_loader_version).await?;
+        // The Quilt loader is a little different in that the Minecraft and Quilt version
+        // are given at runtime via argument, which we do later.
+    } else if let Some(forge_version) = &index.dependencies.forge {
+        forge::download_forge(
+            minecraft_dir.clone(),
+            &index.dependencies.minecraft,
+            &forge_version,
+        )
+        .await?;
+    } else {
+        anyhow::bail!("No supported modloader found");
     }
 
     // TODO Check we're using only valid download URLs

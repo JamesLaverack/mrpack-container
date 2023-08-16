@@ -5,32 +5,32 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use tracing::*;
 
-pub async fn download_fabric(
+pub async fn download_forge(
     mut path: PathBuf,
-    installer_version: &str,
     minecraft_version: &str,
-    fabric_version: &str,
+    forge_version: &str,
 ) -> anyhow::Result<()> {
-    let dl_path = Path::new("https://meta.fabricmc.net/v2/versions/loader")
-        .join(minecraft_version)
-        .join(fabric_version)
-        .join(installer_version)
-        .join("server/jar");
+    // https://maven.minecraftforge.net/net/minecraftforge/forge/1.20.1-47.1.41/forge-1.20.1-47.1.41-installer.jar
+    let version_string = format!("{}-{}", minecraft_version, forge_version);
 
+    let dl_path = Path::new("https://maven.minecraftforge.net/net/minecraftforge/forge/")
+        .join(version_string)
+        .join(format!("forge-{}-installer.jar", version_string));
+
+    // TODO support hash verification
     debug!(u = dl_path.to_str(), "Generated jar download URL");
     let layer_res = reqwest::get(dl_path.to_str().unwrap()).await?;
-    path.push("server.jar");
+    path.push("forge-installer.jar");
     let file = File::create(&path)?;
     let mut hasher = Sha256::new();
     let size = download::stream_to_file_and_hash(layer_res.bytes_stream(), file, &mut hasher).await?;
     info!(
         size_bytes = size,
         sha256 = hasher.result_str(),
-        path = "server.jar",
-        installer_version = installer_version,
+        path = "forge-installer.jar",
         minecraft_version = minecraft_version,
-        fabric_version = fabric_version,
-        "Downloaded fabric server jar"
+        forge_version = forge_version,
+        "Downloaded Forge installer JAR file"
     );
     Ok(())
 }
