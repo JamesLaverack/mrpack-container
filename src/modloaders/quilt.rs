@@ -79,7 +79,7 @@ pub async fn download_quilt(
         .json::<ServerLaunchProfile>()
         .await?;
 
-    let lib_dir = minecraft_dir.join("libraires");
+    let lib_dir = minecraft_dir.join("libraries");
 
     for lib in server_profile.libraries {
         let (group_id, artifact_id, version) = split_artefact(&lib.name)?;
@@ -114,7 +114,7 @@ pub async fn download_quilt(
 
         let request = reqwest::get(download_url.to_str().unwrap()).await?;
         let mut hasher = Sha256::new();
-        let size = download::stream_to_file_and_hash(request.bytes_stream(), jar_file, &mut hasher)
+        let size = download::stream_and_hash(request.bytes_stream(), jar_file, &mut hasher)
             .await?;
         info!(
             name = artifact_id,

@@ -17,6 +17,7 @@ use tracing_subscriber;
 mod download;
 mod modloaders;
 use modloaders::{fabric, forge, quilt};
+mod mojang;
 mod packfile;
 
 #[derive(Parser)]
@@ -126,30 +127,29 @@ async fn main() -> anyhow::Result<()> {
         "Created Minecraft dir in container filesystem"
     );
 
-    // Get the executable, which will be a mod loader
-    if let Some(fabric_version) = &index.dependencies.fabric_loader {
-        let fabric_installer_version = "0.11.1";
+    // Get the Vanilla Minecraft server jar
+    // Most installs will expect this to be downloaded as server.jar
+    let minecraft_vanilla_jar = minecraft_dir.join("server.jar");
+    mojang::download_server_jar(minecraft_vanilla_jar.clone(), &index.dependencies.minecraft)
+        .await?;
 
-        fabric::download_fabric(
-            minecraft_dir.clone(),
-            &fabric_installer_version,
-            &index.dependencies.minecraft,
-            &fabric_version,
-        )
-        .await?;
+    // Install the mod loader
+    if let Some(_fabric_version) = &index.dependencies.fabric_loader {
+        anyhow::bail!("forge not supported");
     } else if let Some(quilt_version) = &index.dependencies.quilt_loader {
-        quilt::download_quilt(minecraft_dir.clone(),
-            &index.dependencies.minecraft,
-            &quilt_version).await?;
-    } else if let Some(forge_version) = &index.dependencies.forge {
-        forge::download_forge(
+        quilt::download_quilt(
             minecraft_dir.clone(),
             &index.dependencies.minecraft,
-            &forge_version,
+            &quilt_version,
         )
         .await?;
+    } else if let Some(_forge_version) = &index.dependencies.forge {
+        anyhow::bail!("forge not supported");
+    } else if let Some(_neoforge_version) = &index.dependencies.neoforge {
+        anyhow::bail!("neoforge not supported");
     } else {
         anyhow::bail!("No supported modloader found");
+        // TODO support pure vanilla installs?
     }
 
     // TODO Check we're using only valid download URLs
@@ -178,7 +178,7 @@ async fn main() -> anyhow::Result<()> {
             fs::create_dir_all(&path.parent().unwrap())?;
             let file = File::create(&path)?;
             let mut hasher = Sha512::new();
-            let size = download::stream_to_file_and_hash(request.bytes_stream(), file, &mut hasher)
+            let size = download::stream_and_hash(request.bytes_stream(), file, &mut hasher)
                 .await?;
             let mut checksum: [u8; 64] = [0; 64];
             hasher.result(&mut checksum);
@@ -339,7 +339,7 @@ async fn main() -> anyhow::Result<()> {
         let mut filepath = dir.clone();
         filepath.push(layer.digest());
         let file = File::create(filepath)?;
-        download::stream_to_file_and_hash(layer_res.bytes_stream(), file, &mut hasher).await?;
+        download::stream_and_hash(layer_res.bytes_stream(), file, &mut hasher).await?;
         if *layer.digest() != "sha256:".to_owned() + &hasher.result_str() {
             warn!(
                 expected = layer.digest(),

@@ -1,14 +1,13 @@
 use bytes::Bytes;
 use crypto::digest::Digest;
 use futures_util::{Stream, StreamExt};
-use std::fs::File;
-use std::io::Write;
 
-pub async fn stream_to_file_and_hash<
+pub async fn stream_and_hash<
     S: Stream<Item = reqwest::Result<Bytes>> + std::marker::Unpin,
+    W: std::io::Write,
 >(
     mut stream: S,
-    mut file: File,
+    mut file: W,
     digest: &mut impl Digest,
 ) -> anyhow::Result<usize> {
     let mut total = 0;

@@ -20,6 +20,7 @@ pub struct Index {
 pub struct Dependencies {
     pub minecraft: String,
     pub forge: Option<String>,
+    pub neoforge: Option<String>,
     pub fabric_loader: Option<String>,
     pub quilt_loader: Option<String>,
 }
