@@ -87,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
     // Setup code
     let args = Args::parse();
     tracing_subscriber::fmt::init();
-    info!("Running MRContainer");
+    info!("Running mrpack-container");
 
     // Load the pack file and extract it
     let path = Path::new(&args.mr_pack_file);

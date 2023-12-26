@@ -1161,7 +1161,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mrcontainer"
+name = "mrpack-container"
 version = "0.1.0"
 dependencies = [
  "anyhow",
