@@ -137,11 +137,10 @@ async fn main() -> anyhow::Result<()> {
             &fabric_version,
         )
         .await?;
-    } else if let Some(_quilt_version) = &index.dependencies.quilt_loader {
-        let quilt_loader_version = "0.8.0";
-        quilt::download_quilt(minecraft_dir.clone(), &quilt_loader_version).await?;
-        // The Quilt loader is a little different in that the Minecraft and Quilt version
-        // are given at runtime via argument, which we do later.
+    } else if let Some(quilt_version) = &index.dependencies.quilt_loader {
+        quilt::download_quilt(minecraft_dir.clone(),
+            &index.dependencies.minecraft,
+            &quilt_version).await?;
     } else if let Some(forge_version) = &index.dependencies.forge {
         forge::download_forge(
             minecraft_dir.clone(),

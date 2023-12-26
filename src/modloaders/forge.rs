@@ -11,11 +11,11 @@ pub async fn download_forge(
     forge_version: &str,
 ) -> anyhow::Result<()> {
     // https://maven.minecraftforge.net/net/minecraftforge/forge/1.20.1-47.1.41/forge-1.20.1-47.1.41-installer.jar
-    let version_string = format!("{}-{}", minecraft_version, forge_version);
+    let version_string = format!("{}-{}", &minecraft_version, &forge_version);
 
     let dl_path = Path::new("https://maven.minecraftforge.net/net/minecraftforge/forge/")
-        .join(version_string)
-        .join(format!("forge-{}-installer.jar", version_string));
+        .join(&version_string)
+        .join(format!("forge-{}-installer.jar", &version_string));
 
     // TODO support hash verification
     debug!(u = dl_path.to_str(), "Generated jar download URL");
