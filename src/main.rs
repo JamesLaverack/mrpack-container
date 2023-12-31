@@ -18,6 +18,7 @@ use tracing::{debug, error, info, warn};
 use tracing_subscriber;
 
 mod download;
+mod hash_writer;
 mod modloaders;
 #[allow(unused_imports)]
 use modloaders::{fabric, forge, quilt};
@@ -92,9 +93,6 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     tracing_subscriber::fmt::init();
     info!("Running mrpack-container");
-
-
-    
 
     // Load the pack file and extract it
     let path = Path::new(&args.mr_pack_file);
@@ -177,11 +175,11 @@ async fn main() -> anyhow::Result<()> {
             // TODO check for path injection here
             let path = minecraft_dir.join(&mrfile.path);
             fs::create_dir_all(&path.parent().unwrap())?;
-            let file = File::create(&path)?;
-            let mut hasher = Sha512::new();
-            let size = download::stream_and_hash(request.bytes_stream(), file, &mut hasher).await?;
-            let checksum: [u8; 64] = [0; 64];
-            hasher.finalize_into(&mut Into::into(checksum));
+
+            let mut hasher = hash_writer::new(File::create(&path)?, Sha512::new());
+            let size = download::stream_to_writer(request.bytes_stream(), &mut hasher).await?;
+            let checksum = hasher.finalize_bytes(); 
+
             if checksum != mrfile.hashes.sha512 {
                 error!(
                     expected_sha512 = hex::encode_upper(mrfile.hashes.sha512),
@@ -213,24 +211,24 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let layer_tmp_path = oci_archive_dir.path().join("tmp.tar.gz");
-    let mut hasher = Sha256::new();
+    let mut hasher = hash_writer::new(File::create(&layer_tmp_path)?, Sha256::new());
     {
         // Do the file writing in a block, so that references to the hash writer and
         // everything else are dropped and then we can read the result from the hasher
-        let layer_tgz = File::create(&layer_tmp_path)?;
-        let hash_writer = download::new(layer_tgz, &mut hasher);
-        let enc = GzEncoder::new(hash_writer, Compression::default());
+        let enc = GzEncoder::new(&mut hasher, Compression::default());
         let mut tar = Builder::new(enc);
-        tar.append_dir_all(minecraft_dir, "/opt/minecraft")?;
+        info!("appending to TAR");
+        tar.append_dir_all("opt/minecraft", &minecraft_dir)?;
     }
-    let layer_hash: [u8; 32] = [0; 32];
-    hasher.finalize_into(&mut Into::into(layer_hash));
+    let checksum = hasher.finalize_bytes();
+    //hasher.finalize_into(&mut Into::into(layer_hash));
     // Rename to it's hash
-    let hash_name = oci_archive_dir.path().join(hex::encode(layer_hash));
+    info!("rename");
+    let hash_name = oci_archive_dir.path().join(hex::encode(checksum));
     fs::rename(layer_tmp_path, &hash_name)?;
     info!(
         path = hash_name.to_str(),
-        hash = hex::encode_upper(layer_hash),
+        hash = hex::encode_upper(checksum),
         "Assembled minecraft layer"
     );
 
@@ -333,6 +331,7 @@ async fn main() -> anyhow::Result<()> {
     // Add layer to image with all mods
     // Emit completed container image
     info!("done!");
+    std::thread::sleep_ms(10000);
     panic!("test panic");
     Ok(())
 }

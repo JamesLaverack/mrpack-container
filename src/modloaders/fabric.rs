@@ -22,9 +22,9 @@ pub async fn download_fabric(
     path.push("server.jar");
     let file = File::create(&path)?;
     let mut hasher = Sha256::new();
-    let size = download::stream_and_hash(layer_res.bytes_stream(), file, &mut hasher).await?;
+    //let size = download::stream_and_hash(layer_res.bytes_stream(), file, &mut hasher).await?;
     info!(
-        size_bytes = size,
+        //size_bytes = size,
         //sha256 = hasher.result_str(),
         path = "server.jar",
         installer_version = installer_version,

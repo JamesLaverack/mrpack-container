@@ -23,9 +23,9 @@ pub async fn download_forge(
     path.push("forge-installer.jar");
     let file = File::create(&path)?;
     let mut hasher = Sha256::new();
-    let size = download::stream_and_hash(layer_res.bytes_stream(), file, &mut hasher).await?;
+    //let size = download::stream_and_hash(layer_res.bytes_stream(), file, &mut hasher).await?;
     info!(
-        size_bytes = size,
+        //size_bytes = size,
         //sha256 = hasher.result_str(),
         path = "forge-installer.jar",
         minecraft_version = minecraft_version,

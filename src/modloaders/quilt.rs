@@ -1,4 +1,5 @@
 use crate::download;
+use crate::hash_writer;
 use digest::Digest;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -110,17 +111,17 @@ pub async fn download_quilt(
         jar_path.push(version);
         std::fs::create_dir_all(&jar_path)?;
         jar_path.push(&jar_name);
-        let jar_file = File::create(&jar_path)?;
 
         let request = reqwest::get(download_url.to_str().unwrap()).await?;
-        let mut hasher = Sha256::new();
-        let size = download::stream_and_hash(request.bytes_stream(), jar_file, &mut hasher).await?;
+        let mut hasher = hash_writer::new(File::create(&jar_path)?, Sha256::new());
+        let size = download::stream_to_writer(request.bytes_stream(), &mut hasher).await?;
+        let checksum = hasher.finalize_bytes();
         info!(
             name = artifact_id,
             group = group_id.join("."),
             version = version,
             url = lib.url,
-            //sha256 = hasher.result_str(),
+            sha256 = hex::encode_upper(checksum),
             jar_name = jar_name,
             jar_path = jar_path.as_os_str().to_str().unwrap(),
             download_url = download_url.as_os_str().to_str().unwrap(),

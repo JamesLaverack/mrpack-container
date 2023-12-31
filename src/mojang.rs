@@ -1,4 +1,5 @@
 use crate::download;
+use crate::hash_writer;
 use bytes::Buf;
 use bytes::BufMut;
 use bytes::BytesMut;
@@ -70,13 +71,9 @@ pub async fn download_server_jar(
         Some(ve) => {
             let request = reqwest::get(ve.url.clone()).await?;
             let mut buf = BytesMut::new();
-            let mut hasher = Sha1::new();
-            let mut hash_writer = download::new((&mut buf).writer(), &mut hasher);
-            {
-                download::stream_to_writer(request.bytes_stream(), &mut hash_writer)
-                    .await?;
-            }
-            let checksum: [u8; 20] = Into::into(hash_writer.finalize_reset());
+            let mut hasher = hash_writer::new((&mut buf).writer(), Sha1::new());
+            download::stream_to_writer(request.bytes_stream(), &mut hasher).await?;
+            let checksum = hasher.finalize_bytes();
             if checksum != ve.sha1 {
                 error!(
                     expected_sha1 = hex::encode_upper(ve.sha1),
@@ -92,12 +89,10 @@ pub async fn download_server_jar(
                 None => anyhow::bail!("Server download unavailable"),
                 Some(server_download) => {
                     let request = reqwest::get(server_download.url.clone()).await?;
-                    let file = File::create(&jar_path)?;
-                    let mut hasher = Sha1::new();
-                    let size = download::stream_and_hash(request.bytes_stream(), file, &mut hasher)
-                        .await?;
-                    let checksum: [u8; 20] = [0; 20];
-                    hasher.finalize_into(&mut Into::into(checksum));
+                    let mut hasher = hash_writer::new(File::create(&jar_path)?, Sha1::new());
+                    let size =
+                        download::stream_to_writer(request.bytes_stream(), &mut hasher).await?;
+                    let checksum = hasher.finalize_bytes();
                     if checksum != server_download.sha1 {
                         error!(
                             expected_sha1 = hex::encode_upper(server_download.sha1),

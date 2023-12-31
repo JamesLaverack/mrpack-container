@@ -1,10 +1,7 @@
 use bytes::Bytes;
-use digest::{Digest, FixedOutputReset};
 use futures_util::{Stream, StreamExt};
-use std::io::{Result, Write};
-#[allow(unused_imports)]
-use tracing::{debug, error, info, warn};
-
+use std::io::Write;
+/*
 pub async fn stream_and_hash<
     S: Stream<Item = reqwest::Result<Bytes>> + std::marker::Unpin,
     W: Write,
@@ -24,7 +21,7 @@ pub async fn stream_and_hash<
     }
     Ok(total)
 }
-
+*/
 pub async fn stream_to_writer<
     S: Stream<Item = reqwest::Result<Bytes>> + std::marker::Unpin,
     W: Write,
@@ -39,31 +36,5 @@ pub async fn stream_to_writer<
         total += chunk.len();
     }
     Ok(total)
-}
-
-pub struct HashWriter<'a, W: Write, D: Digest> {
-    write: W,
-    digest: &'a mut D,
-}
-
-pub fn new<W: Write, D: Digest>(write: W, digest: &mut D) -> HashWriter<W, D> {
-    HashWriter { write, digest }
-}
-
-impl<W: Write, D: Digest> Write for HashWriter<'_, W, D> {
-    fn write(&mut self, buf: &[u8]) -> Result<usize> {
-        self.digest.update(buf);
-        self.write.write(buf)
-    }
-
-    fn flush(&mut self) -> Result<()> {
-        self.write.flush()
-    }
-}
-
-impl<W: Write, D: Digest + FixedOutputReset> HashWriter<'_, W, D> {
-    pub fn finalize_reset(self) -> digest::Output<D> {
-        self.digest.finalize_reset()
-    }
 }
 
