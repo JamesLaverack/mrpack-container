@@ -2,10 +2,9 @@ use anyhow::bail;
 use clap::Parser;
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use oci_distribution::{secrets::RegistryAuth, Client, Reference};
+use oci_distribution::{client::ClientConfig, secrets::RegistryAuth, Client, Reference};
 use packfile::EnvType;
 use sha2::{Digest, Sha256, Sha512};
-use std::env;
 use std::fs;
 use std::fs::File;
 use std::io;
@@ -178,7 +177,7 @@ async fn main() -> anyhow::Result<()> {
 
             let mut hasher = hash_writer::new(File::create(&path)?, Sha512::new());
             let size = download::stream_to_writer(request.bytes_stream(), &mut hasher).await?;
-            let checksum = hasher.finalize_bytes(); 
+            let checksum = hasher.finalize_bytes();
 
             if checksum != mrfile.hashes.sha512 {
                 error!(
@@ -213,17 +212,17 @@ async fn main() -> anyhow::Result<()> {
     let layer_tmp_path = oci_archive_dir.path().join("tmp.tar.gz");
     let mut hasher = hash_writer::new(File::create(&layer_tmp_path)?, Sha256::new());
     {
-        // Do the file writing in a block, so that references to the hash writer and
-        // everything else are dropped and then we can read the result from the hasher
+        // Do the TAR creation in a block.
+        // This is because as long as this GzEncoder exists, it borrows the hasher. We need
+        // that borrow back to do the `.finalize_bytes()` later on.
         let enc = GzEncoder::new(&mut hasher, Compression::default());
         let mut tar = Builder::new(enc);
         info!("appending to TAR");
         tar.append_dir_all("opt/minecraft", &minecraft_dir)?;
     }
     let checksum = hasher.finalize_bytes();
-    //hasher.finalize_into(&mut Into::into(layer_hash));
-    // Rename to it's hash
-    info!("rename");
+    // Rename the layer `.tar.gz` file to its SHA256 hash checksum. This is how layers in a OCI
+    // image work.
     let hash_name = oci_archive_dir.path().join(hex::encode(checksum));
     fs::rename(layer_tmp_path, &hash_name)?;
     info!(
@@ -232,11 +231,8 @@ async fn main() -> anyhow::Result<()> {
         "Assembled minecraft layer"
     );
 
-    // Checksum it, and then rename it to match the checksum
-    // TODO Change to a more effecient method of doing this
-    //
-
-    let client_config = oci_distribution::client::ClientConfig {
+    // Download the rest of the container image layers
+    let client_config = ClientConfig {
         platform_resolver: Some(Box::new(|manifests| {
             manifests
                 .iter()
@@ -257,76 +253,57 @@ async fn main() -> anyhow::Result<()> {
         java_version.major_version
     )
     .parse()?;
+    info!(
+        java_version = java_version.major_version,
+        base_image = base_image_ref.whole().as_str(),
+        "Determined base container image"
+    );
 
-    let (manifest, config, image_hash) = registry_client
+    let (manifest, _config_hash, raw_config) = registry_client
         .pull_manifest_and_config(&base_image_ref, &RegistryAuth::Anonymous)
         .await?;
 
-    /*
-    let config: oci_spec::image::ImageConfiguration = match parse_registry_response(&config_bytes) {
-        Ok(i) => i,
-        Err(e) => match e {
-            RegistryError::ErrorResponse(er) => {
-                for error in er.errors() {
-                    error!(
-                        error_code = format!("{:?}", error.code()),
-                        error_message = error.message(),
-                        error_detail = error.detail(),
-                        "Encountered error from registry"
-                    );
-                }
-                bail!("error from registry");
-            }
-            RegistryError::ParseError(pe) => {
-                error!("couldn't parse JSON");
-                bail!(pe)
-            }
-        },
-    };
-    */
+    let config: oci_spec::image::ImageConfiguration = serde_json::from_str(&raw_config)?;
+    info!(
+        config = config
+            .config()
+            .clone()
+            .unwrap()
+            .env()
+            .clone()
+            .unwrap()
+            .join(", "),
+        "Loaded container config"
+    );
 
-    // Grab all the images to a tmp directory
-    let dir = env::temp_dir();
-    info!(tmp_dir = format!("{:?}", dir), "Using temporary directory");
+    // Download all the layers
+    info!(
+        tmp_dir = format!("{:?}", dir),
+        "Downloading container layers"
+    );
+    // TODO Multithread this, or something
 
     for layer in manifest.layers {
+        let stream = registry_client
+            .pull_blob_stream(&base_image_ref, &layer.digest)
+            .await?;
+        let splits = layer.digest.split(':').collect::<Vec<&str>>();
+        let digest = splits.get(1).expect("Layer had no digest hash");
+        let layer_path = oci_archive_dir.path().join(digest);
+        let mut hasher = hash_writer::new(File::create(&layer_path)?, Sha256::new());
+        download::stream_to_writer(stream, &mut hasher).await?;
+        let checksum = hasher.finalize_bytes();
+        if hex::encode(checksum) != *digest {
+            panic!("Checksum mismatch!")
+        }
         info!(
             digest = layer.digest,
-            media_type = layer.media_type,
+            path = layer_path.as_os_str().to_str().unwrap(),
+            checksum = hex::encode_upper(checksum),
             size_bytes = layer.size,
-            urls = layer.urls.and_then(|s| Some(s.join(", "))),
-            "Downloading layer"
+            "Downloaded layer"
         );
-        /*
-        let mut hasher = Sha256::new();
-        let layer_res = client
-            // Oh I just love string templating user-provided data into a URL...
-            // TODO Don't.
-            .get(
-                "https://registry.hub.docker.com/v2/library/eclipse-temurin/blobs".to_owned()
-                    + layer.digest(),
-            )
-            .header("Accept", "application/vnd.oci.image.layer.v1.tar+gzip")
-            .send()
-            .await?;
-        let mut filepath = dir.clone();
-        filepath.push(layer.digest());
-        let file = File::create(filepath)?;
-        download::stream_and_hash(layer_res.bytes_stream(), file, &mut hasher).await?;
-        if *layer.digest() != "sha256:".to_owned() + &hasher.result_str() {
-            warn!(
-                expected = layer.digest(),
-                actual = hasher.result_str(),
-                "Layer did not match digest!"
-            );
-        } else {
-            debug!(
-                actual = hasher.result_str(),
-                "Layer digest computed and matched"
-            );
-        }
-        info!(digest = layer.digest(), "Download complete");
-        */
+
     }
     // Add layer to image with all mods
     // Emit completed container image
