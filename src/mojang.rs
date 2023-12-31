@@ -2,14 +2,11 @@ use crate::download;
 use bytes::Buf;
 use bytes::BufMut;
 use bytes::BytesMut;
-use crypto::digest::Digest;
-use crypto::sha1::Sha1;
-use crypto::sha2::Sha256;
-use regex::Regex;
+use digest::Digest;
 use serde::{Deserialize, Serialize};
+use sha1::Sha1;
 use std::fs::File;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tracing::*;
 use url::Url;
 
@@ -57,7 +54,10 @@ pub struct Download {
     pub url: Url,
 }
 
-pub async fn download_server_jar(jar_path: PathBuf, minecraft_version: &str) -> anyhow::Result<()> {
+pub async fn download_server_jar(
+    jar_path: PathBuf,
+    minecraft_version: &str,
+) -> anyhow::Result<JavaVersion> {
     match reqwest::get("https://launchermeta.mojang.com/mc/game/version_manifest_v2.json")
         .await?
         .json::<VersionListManifest>()
@@ -71,16 +71,19 @@ pub async fn download_server_jar(jar_path: PathBuf, minecraft_version: &str) -> 
             let request = reqwest::get(ve.url.clone()).await?;
             let mut buf = BytesMut::new();
             let mut hasher = Sha1::new();
-            download::stream_and_hash(request.bytes_stream(), (&mut buf).writer(), &mut hasher)
-                .await?;
-            let mut checksum: [u8; 20] = [0; 20];
-            hasher.result(&mut checksum);
+            let mut hash_writer = download::new((&mut buf).writer(), &mut hasher);
+            {
+                download::stream_to_writer(request.bytes_stream(), &mut hash_writer)
+                    .await?;
+            }
+            let checksum: [u8; 20] = Into::into(hash_writer.finalize_reset());
             if checksum != ve.sha1 {
                 error!(
                     expected_sha1 = hex::encode_upper(ve.sha1),
                     actual_sha1 = hex::encode_upper(checksum),
+                    minecraft_version = minecraft_version,
                     url = &ve.url.as_str(),
-                    "SHA1 checksum did not match!"
+                    "SHA1 for Minecraft version manifest JSON did not match!"
                 );
                 anyhow::bail!("Checksum validation failure");
             }
@@ -91,15 +94,17 @@ pub async fn download_server_jar(jar_path: PathBuf, minecraft_version: &str) -> 
                     let request = reqwest::get(server_download.url.clone()).await?;
                     let file = File::create(&jar_path)?;
                     let mut hasher = Sha1::new();
-                    download::stream_and_hash(request.bytes_stream(), file, &mut hasher).await?;
-                    let mut checksum: [u8; 20] = [0; 20];
-                    hasher.result(&mut checksum);
+                    let size = download::stream_and_hash(request.bytes_stream(), file, &mut hasher)
+                        .await?;
+                    let checksum: [u8; 20] = [0; 20];
+                    hasher.finalize_into(&mut Into::into(checksum));
                     if checksum != server_download.sha1 {
                         error!(
                             expected_sha1 = hex::encode_upper(server_download.sha1),
                             actual_sha1 = hex::encode_upper(checksum),
+                            minecraft_version = minecraft_version,
                             url = server_download.url.as_str(),
-                            "SHA1 checksum did not match!"
+                            "server.jar SHA1 checksum did not match!"
                         );
                         anyhow::bail!("Checksum validation failure");
                     }
@@ -108,9 +113,10 @@ pub async fn download_server_jar(jar_path: PathBuf, minecraft_version: &str) -> 
                         sha1 = hex::encode_upper(checksum),
                         url = server_download.url.as_str(),
                         path = jar_path.to_str(),
+                        size_bytes = size,
                         "Downloaded vanilla Minecraft server JAR"
                     );
-                    return Ok(());
+                    return Ok(manifest.java_version);
                 }
             }
         }

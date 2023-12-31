@@ -1,10 +1,10 @@
 use crate::download;
-use crypto::digest::Digest;
-use crypto::sha2::Sha256;
+use digest::Digest;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tracing::*;
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -114,14 +114,13 @@ pub async fn download_quilt(
 
         let request = reqwest::get(download_url.to_str().unwrap()).await?;
         let mut hasher = Sha256::new();
-        let size = download::stream_and_hash(request.bytes_stream(), jar_file, &mut hasher)
-            .await?;
+        let size = download::stream_and_hash(request.bytes_stream(), jar_file, &mut hasher).await?;
         info!(
             name = artifact_id,
             group = group_id.join("."),
             version = version,
             url = lib.url,
-            sha256 = hasher.result_str(),
+            //sha256 = hasher.result_str(),
             jar_name = jar_name,
             jar_path = jar_path.as_os_str().to_str().unwrap(),
             download_url = download_url.as_os_str().to_str().unwrap(),

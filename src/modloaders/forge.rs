@@ -1,6 +1,6 @@
 use crate::download;
-use crypto::digest::Digest;
-use crypto::sha2::Sha256;
+use digest::Digest;
+use sha2::Sha256;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use tracing::*;
@@ -26,7 +26,7 @@ pub async fn download_forge(
     let size = download::stream_and_hash(layer_res.bytes_stream(), file, &mut hasher).await?;
     info!(
         size_bytes = size,
-        sha256 = hasher.result_str(),
+        //sha256 = hasher.result_str(),
         path = "forge-installer.jar",
         minecraft_version = minecraft_version,
         forge_version = forge_version,
