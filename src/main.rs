@@ -2,12 +2,16 @@ use anyhow::bail;
 use clap::Parser;
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use oci_distribution::{client::ClientConfig, secrets::RegistryAuth, Client, Reference};
+use oci_distribution::{
+    client::ClientConfig, config::ConfigFile, manifest::OciDescriptor, secrets::RegistryAuth,
+    Client, Reference,
+};
 use packfile::EnvType;
 use sha2::{Digest, Sha256, Sha512};
 use std::fs;
 use std::fs::File;
 use std::io;
+use std::io::Write;
 use std::path::Path;
 use tar::Builder;
 use tempfile::tempdir;
@@ -29,6 +33,9 @@ mod packfile;
 struct Args {
     #[arg(help = "Path to the Modrinth Modpack file")]
     mr_pack_file: String,
+
+    #[arg(short, long, help = "Output file")]
+    output_file: String,
 }
 
 #[derive(Error, Debug)]
@@ -100,6 +107,7 @@ async fn main() -> anyhow::Result<()> {
     }
     // TODO Support reading from HTTPS
     // TODO Support reading from S3
+    // TODO Support reading from Modrinth with modrinth:// or something?
     let mut zipfile = zip::ZipArchive::new(File::open(path)?)?;
     let index_file = match zipfile.by_name("modrinth.index.json") {
         Ok(file) => file,
@@ -133,10 +141,13 @@ async fn main() -> anyhow::Result<()> {
             .await?;
 
     // Install the mod loader
+    // The way we need to configure the container later will depend on the mod loader. So we'll get
+    // a configuration function back
+    let java_config;
     if let Some(_fabric_version) = &index.dependencies.fabric_loader {
-        anyhow::bail!("forge not supported");
+        anyhow::bail!("fabric not supported");
     } else if let Some(quilt_version) = &index.dependencies.quilt_loader {
-        quilt::download_quilt(
+        java_config = quilt::download_quilt(
             minecraft_dir.into(),
             &index.dependencies.minecraft,
             &quilt_version,
@@ -210,24 +221,24 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let layer_tmp_path = oci_archive_dir.path().join("tmp.tar.gz");
-    let mut hasher = hash_writer::new(File::create(&layer_tmp_path)?, Sha256::new());
+    let mut layer_hasher = hash_writer::new(File::create(&layer_tmp_path)?, Sha256::new());
     {
         // Do the TAR creation in a block.
         // This is because as long as this GzEncoder exists, it borrows the hasher. We need
         // that borrow back to do the `.finalize_bytes()` later on.
-        let enc = GzEncoder::new(&mut hasher, Compression::default());
+        let enc = GzEncoder::new(&mut layer_hasher, Compression::default());
         let mut tar = Builder::new(enc);
         info!("appending to TAR");
         tar.append_dir_all("opt/minecraft", &minecraft_dir)?;
     }
-    let checksum = hasher.finalize_bytes();
+    let layer_checksum = layer_hasher.finalize_bytes();
     // Rename the layer `.tar.gz` file to its SHA256 hash checksum. This is how layers in a OCI
     // image work.
-    let hash_name = oci_archive_dir.path().join(hex::encode(checksum));
-    fs::rename(layer_tmp_path, &hash_name)?;
+    let layer_hash_name = oci_archive_dir.path().join(hex::encode(layer_checksum));
+    fs::rename(layer_tmp_path, &layer_hash_name)?;
     info!(
-        path = hash_name.to_str(),
-        hash = hex::encode_upper(checksum),
+        path = layer_hash_name.to_str(),
+        hash = hex::encode_upper(layer_checksum),
         "Assembled minecraft layer"
     );
 
@@ -259,22 +270,78 @@ async fn main() -> anyhow::Result<()> {
         "Determined base container image"
     );
 
-    let (manifest, _config_hash, raw_config) = registry_client
+    let (mut manifest, _config_hash, raw_config) = registry_client
         .pull_manifest_and_config(&base_image_ref, &RegistryAuth::Anonymous)
         .await?;
 
-    let config: oci_spec::image::ImageConfiguration = serde_json::from_str(&raw_config)?;
+    let mut config_file: ConfigFile = serde_json::from_str(&raw_config)?;
     info!(
-        config = config
-            .config()
+        env = config_file
+            .config
             .clone()
-            .unwrap()
-            .env()
-            .clone()
-            .unwrap()
-            .join(", "),
+            .and_then(|config| config.env)
+            .map(|env| env.join(", ")),
         "Loaded container config"
     );
+
+    // Update the config for our application
+    {
+        // We don't create a custom JAR with everything bundled in, so instead set the classpath to
+        // the individual JAR libraries, and set the main class this way.
+        let mut c = config_file.config.unwrap_or_default();
+        c.cmd = Some(
+            [
+                "java".to_string(),
+                "--class-path".to_string(),
+                java_config
+                    .jars
+                    .into_iter()
+                    .map(|p| p.as_os_str().to_str().unwrap().to_string())
+                    .collect::<Vec<String>>()
+                    .join(":"),
+                java_config.main_class,
+            ]
+            .to_vec(),
+        );
+        config_file.config = Some(c);
+        // Update history
+        use chrono::prelude::Utc;
+        let mut h = config_file.history.unwrap_or_default();
+        h.push(oci_distribution::config::History {
+            created: Some(Utc::now()),
+            author: Some("mrpack-container".to_string()),
+            ..Default::default()
+        });
+        config_file.history = Some(h.to_vec());
+        // Update RootFS
+        config_file
+            .rootfs
+            .diff_ids
+            .push(hex::encode(layer_checksum));
+    }
+    // Write out the config JSON file
+    let config_tmp_path = oci_archive_dir.path().join("config.json");
+    let config_tmp_file = File::create(&config_tmp_path)?;
+    let mut config_hasher = hash_writer::new(&config_tmp_file, Sha256::new());
+    let config_file_json = serde_json::to_string(&config_file)?;
+    let config_file_json_bytes = config_file_json.as_bytes();
+    config_hasher.write_all(config_file_json_bytes)?;
+    config_tmp_file.sync_all()?;
+    let config_checksum = config_hasher.finalize_bytes();
+    // Rename the `config.json` file to its SHA256 hash checksum.
+    let config_hash_name = oci_archive_dir.path().join(hex::encode(config_checksum));
+    fs::rename(config_tmp_path, &config_hash_name)?;
+    info!(
+        path = config_hash_name.to_str(),
+        hash = hex::encode_upper(config_checksum),
+        "Wrote Container Config file"
+    );
+    manifest.config = OciDescriptor {
+        media_type: "application/vnd.oci.image.config.v1+json".to_string(),
+        digest: hex::encode(config_checksum),
+        size: i64::try_from(config_file_json_bytes.len())?,
+        ..Default::default()
+    };
 
     // Download all the layers
     info!(
@@ -282,8 +349,7 @@ async fn main() -> anyhow::Result<()> {
         "Downloading container layers"
     );
     // TODO Multithread this, or something
-
-    for layer in manifest.layers {
+    for layer in &manifest.layers {
         let stream = registry_client
             .pull_blob_stream(&base_image_ref, &layer.digest)
             .await?;
@@ -303,12 +369,39 @@ async fn main() -> anyhow::Result<()> {
             size_bytes = layer.size,
             "Downloaded layer"
         );
-
     }
-    // Add layer to image with all mods
-    // Emit completed container image
+
+    // Add our new layer from earlier into the manifest
+    manifest.layers.push(OciDescriptor {
+        media_type: "application/vnd.oci.image.layer.v1.tar+gzip".to_string(),
+        digest: hex::encode(layer_checksum),
+        size: i64::try_from(config_file_json_bytes.len())?,
+        ..Default::default()
+    });
+
+    // Write the manifest
+    let manifest_file_path = oci_archive_dir.path().join("manifest.json");
+    let mut manifest_file = File::create(&manifest_file_path)?;
+    manifest_file.write_all(serde_json::to_string(&manifest)?.as_bytes())?;
+    manifest_file.sync_all()?;
+    info!(
+        path = manifest_file_path.as_os_str().to_str().unwrap(),
+        "Wrote manifest file"
+    );
+
+    // Tar up the completed container image
+    {
+        let mut output_tar_file = File::create(&args.output_file)?;
+        let enc = GzEncoder::new(&mut output_tar_file, Compression::none());
+        let mut tar = Builder::new(enc);
+        tar.append_dir_all("", &oci_archive_dir)?;
+    }
+    info!(
+        output_file = args.output_file,
+        "Outputted saved container TAR"
+    );
+
+    info!("🚨Do NOT distribute this image publicly.🚨 It conatains Mojang property. See the Minecraft EULA.");
     info!("done!");
-    std::thread::sleep_ms(10000);
-    panic!("test panic");
     Ok(())
 }

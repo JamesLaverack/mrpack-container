@@ -1241,6 +1241,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes 1.4.0",
+ "chrono",
  "clap",
  "crypto-common",
  "digest 0.10.7",

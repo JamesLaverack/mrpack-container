@@ -1,5 +1,6 @@
 use crate::download;
 use crate::hash_writer;
+use crate::modloaders;
 use digest::Digest;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -7,6 +8,8 @@ use sha2::Sha256;
 use std::fs::File;
 use std::path::PathBuf;
 use tracing::*;
+
+use super::JavaConfig;
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -57,7 +60,7 @@ pub async fn download_quilt(
     minecraft_dir: PathBuf,
     minecraft_version: &str,
     loader_version: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<super::JavaConfig> {
     // We intentionally don't use the Quilt installer. This saves us from either having to bundle
     // Java and run it now, or include it to be run when the container starts, which would take a
     // while.
@@ -82,6 +85,7 @@ pub async fn download_quilt(
 
     let lib_dir = minecraft_dir.join("libraries");
 
+    let mut jar_paths = Vec::new();
     for lib in server_profile.libraries {
         let (group_id, artifact_id, version) = split_artefact(&lib.name)?;
         // We've already validated these for things like path escapes and other weirdness
@@ -128,23 +132,13 @@ pub async fn download_quilt(
             size_bytes = size,
             "Library downloaded"
         );
+
+        // We only want to store the *relative* path.
+        jar_paths.push(jar_path.strip_prefix(&minecraft_dir)?.to_path_buf());
     }
 
-    // TODO support hash verification
-    /*
-    debug!(u = dl_path.to_str(), "Generated jar download URL");
-    let layer_res = reqwest::get(dl_path.to_str().unwrap()).await?;
-    path.push("quilt-installer.jar");
-    let file = File::create(&path)?;
-    let mut hasher = Sha256::new();
-    let size = download::stream_to_file_and_hash(layer_res.bytes_stream(), file, &mut hasher).await?;
-    info!(
-        size_bytes = size,
-        sha256 = hasher.result_str(),
-        path = "quilt-installer.jar",
-        installer_version = installer_version,
-        "Downloaded Quilt installer JAR file"
-    );
-    */
-    Ok(())
+    Ok(JavaConfig{
+        jars: jar_paths,
+        main_class: "org.quiltmc.loader.impl.launch.server.QuiltServerLauncher".to_string(),
+    })
 }
