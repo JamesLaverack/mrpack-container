@@ -4,8 +4,6 @@ pub mod fabric;
 pub mod forge;
 pub mod quilt;
 
-pub type ContainerConfigUpdater := dyn Fn();
-
 pub struct JavaConfig {
     pub jars: Vec<PathBuf>,
     pub main_class: String,

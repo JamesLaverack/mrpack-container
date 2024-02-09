@@ -52,18 +52,6 @@ pub enum RegistryError {
     ParseError(serde_json::Error),
 }
 
-fn parse_registry_response<'a, T: serde::Deserialize<'a>>(
-    raw: &'a [u8],
-) -> Result<T, RegistryError> {
-    match serde_json::from_slice(&raw) {
-        Ok(r) => Ok(r),
-        Err(e) => match serde_json::from_slice(&raw) {
-            Ok(er) => Err(RegistryError::ErrorResponse(er)),
-            Err(_) => Err(RegistryError::ParseError(e)),
-        },
-    }
-}
-
 fn extract_overrides<R: std::io::Read + std::io::Seek>(
     zipfile: &mut zip::ZipArchive<R>,
     minecraft_dir: &std::path::Path,
@@ -226,7 +214,7 @@ async fn main() -> anyhow::Result<()> {
         // Do the TAR creation in a block.
         // This is because as long as this GzEncoder exists, it borrows the hasher. We need
         // that borrow back to do the `.finalize_bytes()` later on.
-        let enc = GzEncoder::new(&mut layer_hasher, Compression::default());
+        let enc = GzEncoder::new(&mut layer_hasher, Compression::best());
         let mut tar = Builder::new(enc);
         info!("appending to TAR");
         tar.append_dir_all("opt/minecraft", &minecraft_dir)?;
@@ -391,9 +379,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Tar up the completed container image
     {
-        let mut output_tar_file = File::create(&args.output_file)?;
-        let enc = GzEncoder::new(&mut output_tar_file, Compression::none());
-        let mut tar = Builder::new(enc);
+        let output_tar_file = File::create(&args.output_file)?;
+        let mut tar = Builder::new(output_tar_file);
         tar.append_dir_all("", &oci_archive_dir)?;
     }
     info!(
@@ -401,7 +388,9 @@ async fn main() -> anyhow::Result<()> {
         "Outputted saved container TAR"
     );
 
-    info!("🚨Do NOT distribute this image publicly.🚨 It conatains Mojang property. See the Minecraft EULA.");
+    warn!(
+        eula_url = "https://www.minecraft.net/en-us/eula".to_string(),
+        "🚨Do NOT distribute this image publicly.🚨 It conatains Mojang property. See the Minecraft EULA.");
     info!("done!");
     Ok(())
 }
