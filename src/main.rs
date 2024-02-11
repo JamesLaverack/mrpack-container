@@ -1,4 +1,5 @@
 use anyhow::bail;
+use chrono::prelude::Utc;
 use clap::Parser;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -8,11 +9,11 @@ use oci_distribution::{
 };
 use packfile::EnvType;
 use sha2::{Digest, Sha256, Sha512};
-use std::fs;
 use std::fs::File;
 use std::io;
 use std::io::Write;
 use std::path::Path;
+use std::{collections::HashMap, fs};
 use tar::Builder;
 use tempfile::tempdir;
 use thiserror::Error;
@@ -39,6 +40,12 @@ struct Args {
 
     #[arg(short, long, help = "Emit to STDOUT")]
     stdout: bool,
+
+    #[arg(long, help = "Container Architecture", default_value = "amd64")]
+    arch: String,
+
+    #[arg(long, help = "Container OS", default_value = "linux")]
+    os: String,
 }
 
 #[derive(Error, Debug)]
@@ -97,6 +104,8 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("One of --stdout or --output-file required");
     }
     info!("Running mrpack-container");
+
+    let created_timestamp = Utc::now();
 
     // Load the pack file and extract it
     let path = Path::new(&args.mr_pack_file);
@@ -243,13 +252,10 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Download the rest of the container image layers
-    // TODO support other architectures and platforms
-    let os = "linux".to_string();
-    let arch = "amd64".to_string();
 
     // Clone the os/arch and move them into the closure for lifetime reasons
-    let osc = os.clone();
-    let archc = arch.clone();
+    let osc = args.os.clone();
+    let archc = args.arch.clone();
     let client_config = ClientConfig {
         platform_resolver: Some(Box::new(move |manifests| {
             manifests
@@ -266,7 +272,7 @@ async fn main() -> anyhow::Result<()> {
     let mut registry_client = Client::new(client_config);
     // TODO Allow image override
     let base_image_ref: Reference = format!(
-        "docker.io/eclipse-temurin:{}-jre-alpine",
+        "docker.io/eclipse-temurin:{}-jre",
         java_version.major_version
     )
     .parse()?;
@@ -303,28 +309,30 @@ async fn main() -> anyhow::Result<()> {
                     .jars
                     .into_iter()
                     .map(|p| p.as_os_str().to_str().unwrap().to_string())
+                    .map(|p| format!("/opt/minecraft/{}", p))
                     .collect::<Vec<String>>()
                     .join(":"),
                 java_config.main_class,
             ]
             .to_vec(),
         );
+        c.working_dir = Some("/opt/minecraft".to_string());
         config_file.config = Some(c);
         // Update history with the fact that we've built this image, but otherwise use the base
         // image's history
-        use chrono::prelude::Utc;
         let mut h = config_file.history.unwrap_or_default();
         h.push(oci_distribution::config::History {
-            created: Some(Utc::now()),
+            created: Some(created_timestamp),
             author: Some("mrpack-container".to_string()),
             ..Default::default()
         });
         config_file.history = Some(h.to_vec());
         // Update RootFS
+        config_file.created = Some(created_timestamp);
         config_file
             .rootfs
             .diff_ids
-            .push(hex::encode(layer_checksum));
+            .push(format!("sha256:{}", hex::encode(layer_checksum)));
     }
     // Write out the config JSON file.
     let config_tmp_path = oci_blob_dir.join("config.json");
@@ -378,6 +386,15 @@ async fn main() -> anyhow::Result<()> {
             "Downloaded layer"
         );
     }
+    manifest.layers = manifest
+        .layers
+        .into_iter()
+        .map(|mut layer| {
+            // TODO don't assume all layers are gziped
+            layer.media_type = "application/vnd.oci.image.layer.v1.tar+gzip".to_string();
+            layer
+        })
+        .collect();
 
     // Add our new layer from earlier into the manifest
     manifest.layers.push(OciDescriptor {
@@ -404,8 +421,8 @@ async fn main() -> anyhow::Result<()> {
         path = manifest_tmp_file_path.as_os_str().to_str().unwrap(),
         len_bytes = manifest_bytes.len(),
         hash = hex::encode_upper(manifest_checksum),
-        os = os,
-        arch = arch,
+        os = args.os,
+        arch = args.arch,
         "Wrote image manifest"
     );
 
@@ -418,8 +435,8 @@ async fn main() -> anyhow::Result<()> {
             size: manifest_bytes.len() as i64,
             digest: format!("sha256:{}", hex::encode(manifest_checksum)),
             platform: Some(oci_distribution::manifest::Platform {
-                architecture: arch,
-                os: os,
+                architecture: args.arch,
+                os: args.os,
                 os_version: None,
                 os_features: None,
                 variant: None,
@@ -427,7 +444,10 @@ async fn main() -> anyhow::Result<()> {
             }),
             annotations: None,
         }],
-        annotations: None,
+        annotations: Some(HashMap::from([(
+            "org.opencontainers.image.ref.name".to_string(),
+            index.name,
+        )])),
     };
     let index_string = serde_json::to_string(&index)?;
     let index_bytes = index_string.as_bytes();
