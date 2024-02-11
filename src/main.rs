@@ -35,7 +35,10 @@ struct Args {
     mr_pack_file: String,
 
     #[arg(short, long, help = "Output file")]
-    output_file: String,
+    output_file: Option<String>,
+
+    #[arg(short, long, help = "Emit to STDOUT")]
+    stdout: bool,
 }
 
 #[derive(Error, Debug)]
@@ -83,9 +86,16 @@ fn extract_overrides<R: std::io::Read + std::io::Seek>(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Setup code
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)?;
+
     let args = Args::parse();
-    tracing_subscriber::fmt::init();
+    if !args.stdout && args.output_file.is_none() {
+        error!("One of --stdout or --output-file required");
+        anyhow::bail!("One of --stdout or --output-file required");
+    }
     info!("Running mrpack-container");
 
     // Load the pack file and extract it
@@ -203,12 +213,14 @@ async fn main() -> anyhow::Result<()> {
     // Write as new layer
     info!("Creating new layer tarball");
     let oci_archive_dir = tempdir()?;
+    let oci_blob_dir = oci_archive_dir.path().join("blobs").join("sha256");
+    fs::create_dir_all(&oci_blob_dir)?;
     info!(
         path = oci_archive_dir.path().as_os_str().to_str().unwrap(),
         "Assembling new container as oci-archive"
     );
 
-    let layer_tmp_path = oci_archive_dir.path().join("tmp.tar.gz");
+    let layer_tmp_path = oci_blob_dir.join("tmp.tar.gz");
     let mut layer_hasher = hash_writer::new(File::create(&layer_tmp_path)?, Sha256::new());
     {
         // Do the TAR creation in a block.
@@ -222,7 +234,7 @@ async fn main() -> anyhow::Result<()> {
     let layer_checksum = layer_hasher.finalize_bytes();
     // Rename the layer `.tar.gz` file to its SHA256 hash checksum. This is how layers in a OCI
     // image work.
-    let layer_hash_name = oci_archive_dir.path().join(hex::encode(layer_checksum));
+    let layer_hash_name = oci_blob_dir.join(hex::encode(layer_checksum));
     fs::rename(layer_tmp_path, &layer_hash_name)?;
     info!(
         path = layer_hash_name.to_str(),
@@ -231,14 +243,20 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Download the rest of the container image layers
+    // TODO support other architectures and platforms
+    let os = "linux".to_string();
+    let arch = "amd64".to_string();
+
+    // Clone the os/arch and move them into the closure for lifetime reasons
+    let osc = os.clone();
+    let archc = arch.clone();
     let client_config = ClientConfig {
-        platform_resolver: Some(Box::new(|manifests| {
+        platform_resolver: Some(Box::new(move |manifests| {
             manifests
                 .iter()
                 .find(|entry| {
                     entry.platform.as_ref().map_or(false, |platform| {
-                        // TODO support other architectures and platforms
-                        platform.os == "linux" && platform.architecture == "amd64"
+                        platform.os == osc && platform.architecture == archc
                     })
                 })
                 .map(|e| e.digest.clone())
@@ -292,7 +310,8 @@ async fn main() -> anyhow::Result<()> {
             .to_vec(),
         );
         config_file.config = Some(c);
-        // Update history
+        // Update history with the fact that we've built this image, but otherwise use the base
+        // image's history
         use chrono::prelude::Utc;
         let mut h = config_file.history.unwrap_or_default();
         h.push(oci_distribution::config::History {
@@ -307,8 +326,8 @@ async fn main() -> anyhow::Result<()> {
             .diff_ids
             .push(hex::encode(layer_checksum));
     }
-    // Write out the config JSON file
-    let config_tmp_path = oci_archive_dir.path().join("config.json");
+    // Write out the config JSON file.
+    let config_tmp_path = oci_blob_dir.join("config.json");
     let config_tmp_file = File::create(&config_tmp_path)?;
     let mut config_hasher = hash_writer::new(&config_tmp_file, Sha256::new());
     let config_file_json = serde_json::to_string(&config_file)?;
@@ -317,7 +336,7 @@ async fn main() -> anyhow::Result<()> {
     config_tmp_file.sync_all()?;
     let config_checksum = config_hasher.finalize_bytes();
     // Rename the `config.json` file to its SHA256 hash checksum.
-    let config_hash_name = oci_archive_dir.path().join(hex::encode(config_checksum));
+    let config_hash_name = oci_blob_dir.join(hex::encode(config_checksum));
     fs::rename(config_tmp_path, &config_hash_name)?;
     info!(
         path = config_hash_name.to_str(),
@@ -326,7 +345,7 @@ async fn main() -> anyhow::Result<()> {
     );
     manifest.config = OciDescriptor {
         media_type: "application/vnd.oci.image.config.v1+json".to_string(),
-        digest: hex::encode(config_checksum),
+        digest: format!("sha256:{}", hex::encode(config_checksum)),
         size: i64::try_from(config_file_json_bytes.len())?,
         ..Default::default()
     };
@@ -341,9 +360,10 @@ async fn main() -> anyhow::Result<()> {
         let stream = registry_client
             .pull_blob_stream(&base_image_ref, &layer.digest)
             .await?;
+        // TODO don't assume everything is SHA256
         let splits = layer.digest.split(':').collect::<Vec<&str>>();
         let digest = splits.get(1).expect("Layer had no digest hash");
-        let layer_path = oci_archive_dir.path().join(digest);
+        let layer_path = oci_blob_dir.join(digest);
         let mut hasher = hash_writer::new(File::create(&layer_path)?, Sha256::new());
         download::stream_to_writer(stream, &mut hasher).await?;
         let checksum = hasher.finalize_bytes();
@@ -362,31 +382,86 @@ async fn main() -> anyhow::Result<()> {
     // Add our new layer from earlier into the manifest
     manifest.layers.push(OciDescriptor {
         media_type: "application/vnd.oci.image.layer.v1.tar+gzip".to_string(),
-        digest: hex::encode(layer_checksum),
+        digest: format!("sha256:{}", hex::encode(layer_checksum)),
         size: i64::try_from(config_file_json_bytes.len())?,
         ..Default::default()
     });
+    // Set the OCI media type
+    manifest.media_type = Some("application/vnd.oci.image.manifest.v1+json".to_string());
 
-    // Write the manifest
-    let manifest_file_path = oci_archive_dir.path().join("manifest.json");
-    let mut manifest_file = File::create(&manifest_file_path)?;
-    manifest_file.write_all(serde_json::to_string(&manifest)?.as_bytes())?;
-    manifest_file.sync_all()?;
+    // Write the manifest. In a docker image this is a file in the root named manifest.json
+    // in an OCI image it's also a blob.
+    let manifest_tmp_file_path = oci_blob_dir.join("manifest.json");
+    let manifest_tmp_file = File::create(&manifest_tmp_file_path)?;
+    let mut manifest_hasher = hash_writer::new(&manifest_tmp_file, Sha256::new());
+    let manifest_string = serde_json::to_string(&manifest)?;
+    let manifest_bytes = manifest_string.as_bytes();
+    manifest_hasher.write_all(manifest_bytes)?;
+    let manifest_checksum = manifest_hasher.finalize_bytes();
+    let manifest_hash_name = oci_blob_dir.join(hex::encode(manifest_checksum));
+    fs::rename(&manifest_tmp_file_path, &manifest_hash_name)?;
     info!(
-        path = manifest_file_path.as_os_str().to_str().unwrap(),
-        "Wrote manifest file"
+        path = manifest_tmp_file_path.as_os_str().to_str().unwrap(),
+        len_bytes = manifest_bytes.len(),
+        hash = hex::encode_upper(manifest_checksum),
+        os = os,
+        arch = arch,
+        "Wrote image manifest"
+    );
+
+    // In an OCI iamge we also require a top-level index.json and oci-layout file.
+    let index = oci_distribution::manifest::OciImageIndex {
+        schema_version: 2,
+        media_type: Some("application/vnd.oci.image.index.v1+json".to_string()),
+        manifests: vec![oci_distribution::manifest::ImageIndexEntry {
+            media_type: manifest.media_type.unwrap(),
+            size: manifest_bytes.len() as i64,
+            digest: format!("sha256:{}", hex::encode(manifest_checksum)),
+            platform: Some(oci_distribution::manifest::Platform {
+                architecture: arch,
+                os: os,
+                os_version: None,
+                os_features: None,
+                variant: None,
+                features: None,
+            }),
+            annotations: None,
+        }],
+        annotations: None,
+    };
+    let index_string = serde_json::to_string(&index)?;
+    let index_bytes = index_string.as_bytes();
+    let index_file_path = oci_archive_dir.path().join("index.json");
+    let mut index_file = File::create(&index_file_path)?;
+    index_file.write_all(index_bytes)?;
+    info!(
+        path = index_file_path.as_os_str().to_str().unwrap(),
+        len_bytes = index_bytes.len(),
+        "Wrote OCI Index file"
+    );
+
+    let layout_bytes = "{\"imageLayoutVersion\": \"1.0.0\"}".as_bytes();
+    let layout_file_path = oci_archive_dir.path().join("oci-layout");
+    let mut layout_file = File::create(&layout_file_path)?;
+    layout_file.write_all(layout_bytes)?;
+    info!(
+        path = layout_file_path.as_os_str().to_str().unwrap(),
+        len_bytes = layout_bytes.len(),
+        "Wrote OCI layout file"
     );
 
     // Tar up the completed container image
-    {
-        let output_tar_file = File::create(&args.output_file)?;
+    if let Some(of) = &args.output_file {
+        let output_tar_file = File::create(of)?;
         let mut tar = Builder::new(output_tar_file);
         tar.append_dir_all("", &oci_archive_dir)?;
+        info!(output_file = of, "Outputted saved container TAR");
     }
-    info!(
-        output_file = args.output_file,
-        "Outputted saved container TAR"
-    );
+    if args.stdout {
+        let mut tar = Builder::new(io::stdout());
+        tar.append_dir_all("", &oci_archive_dir)?;
+        info!("Outputted container TAR to STDOUT");
+    }
 
     warn!(
         eula_url = "https://www.minecraft.net/en-us/eula".to_string(),
