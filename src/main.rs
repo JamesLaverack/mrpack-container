@@ -9,11 +9,11 @@ use oci_distribution::{
 };
 use packfile::EnvType;
 use sha2::{Digest, Sha256, Sha512};
-use std::fs::File;
 use std::io;
 use std::io::Write;
 use std::path::Path;
 use std::{collections::HashMap, fs};
+use std::{collections::HashSet, fs::File};
 use tar::Builder;
 use tempfile::tempdir;
 use thiserror::Error;
@@ -237,6 +237,8 @@ async fn main() -> anyhow::Result<()> {
         // that borrow back to do the `.finalize_bytes()` later on.
         let enc = GzEncoder::new(&mut layer_hasher, Compression::best());
         let mut tar = Builder::new(enc);
+        // Security feature
+        tar.follow_symlinks(false);
         info!("appending to TAR");
         tar.append_dir_all("opt/minecraft", &minecraft_dir)?;
     }
@@ -282,58 +284,60 @@ async fn main() -> anyhow::Result<()> {
         "Determined base container image"
     );
 
-    let (mut manifest, _config_hash, raw_config) = registry_client
+    let (mut manifest, _config_hash, raw_base_config) = registry_client
         .pull_manifest_and_config(&base_image_ref, &RegistryAuth::Anonymous)
         .await?;
 
-    let mut config_file: ConfigFile = serde_json::from_str(&raw_config)?;
-    info!(
-        env = config_file
-            .config
-            .clone()
-            .and_then(|config| config.env)
-            .map(|env| env.join(", ")),
-        "Loaded container config"
-    );
+    let config_base_file: ConfigFile = serde_json::from_str(&raw_base_config)?;
+    info!("Loaded base container config");
 
-    // Update the config for our application
-    {
-        // We don't create a custom JAR with everything bundled in, so instead set the classpath to
-        // the individual JAR libraries, and set the main class this way.
-        let mut c = config_file.config.unwrap_or_default();
-        c.cmd = Some(
-            [
-                "java".to_string(),
-                "--class-path".to_string(),
-                java_config
-                    .jars
-                    .into_iter()
-                    .map(|p| p.as_os_str().to_str().unwrap().to_string())
-                    .map(|p| format!("/opt/minecraft/{}", p))
-                    .collect::<Vec<String>>()
-                    .join(":"),
-                java_config.main_class,
-            ]
-            .to_vec(),
-        );
-        c.working_dir = Some("/opt/minecraft".to_string());
-        config_file.config = Some(c);
-        // Update history with the fact that we've built this image, but otherwise use the base
-        // image's history
-        let mut h = config_file.history.unwrap_or_default();
-        h.push(oci_distribution::config::History {
+    // Write a new config, although much of it will be copied over.
+    let mut layer_diff_ids = config_base_file.rootfs.diff_ids.clone();
+    layer_diff_ids.push(format!("sha256:{}", hex::encode(layer_checksum)));
+    let config_file = oci_distribution::config::ConfigFile {
+        created: Some(created_timestamp),
+        architecture: config_base_file.architecture,
+        os: config_base_file.os,
+        config: Some(oci_distribution::config::Config {
+            // TODO force non-root
+            user: config_base_file.config.clone().and_then(|c| c.user),
+            // The default Minecraft server port
+            exposed_ports: Some(HashSet::from(["25565/tcp".to_string()])),
+            // TODO fix this clone() mess
+            env: config_base_file.config.clone().unwrap_or_default().env,
+            cmd: Some(
+                [
+                    "java".to_string(),
+                    // We don't create a custom JAR with everything bundled in, so instead set the classpath to
+                    // the individual JAR libraries, and set the main class this way.
+                    "--class-path".to_string(),
+                    java_config
+                        .jars
+                        .into_iter()
+                        .map(|p| p.as_os_str().to_str().unwrap().to_string())
+                        .map(|p| format!("/opt/minecraft/{}", p))
+                        .collect::<Vec<String>>()
+                        .join(":"),
+                    java_config.main_class,
+                ]
+                .to_vec(),
+            ),
+            entrypoint: config_base_file.config.unwrap_or_default().entrypoint,
+            working_dir: Some("/opt/minecraft".to_string()),
+            ..Default::default()
+        }),
+        // We don't include the history of the base container
+        history: Some(vec![oci_distribution::config::History {
             created: Some(created_timestamp),
             author: Some("mrpack-container".to_string()),
             ..Default::default()
-        });
-        config_file.history = Some(h.to_vec());
-        // Update RootFS
-        config_file.created = Some(created_timestamp);
-        config_file
-            .rootfs
-            .diff_ids
-            .push(format!("sha256:{}", hex::encode(layer_checksum)));
-    }
+        }]),
+        rootfs: oci_distribution::config::Rootfs {
+            r#type: "layers".to_string(),
+            diff_ids: layer_diff_ids,
+        },
+        ..Default::default()
+    };
     // Write out the config JSON file.
     let config_tmp_path = oci_blob_dir.join("config.json");
     let config_tmp_file = File::create(&config_tmp_path)?;
@@ -444,10 +448,10 @@ async fn main() -> anyhow::Result<()> {
             }),
             annotations: None,
         }],
-        annotations: Some(HashMap::from([(
-            "org.opencontainers.image.ref.name".to_string(),
-            index.name,
-        )])),
+        annotations: Some(HashMap::from([
+            ("org.opencontainers.image.ref.name".to_string(), index.name),
+            ("org.opencontainers.image.base.name".to_string(), base_image_ref.to_string()),
+        ])),
     };
     let index_string = serde_json::to_string(&index)?;
     let index_bytes = index_string.as_bytes();
