@@ -29,8 +29,8 @@ jobs:
           name: binary
       - run: mv target/release/mrpack-contianer /usr/local/bin/mrpack-container
       - run: |
-        container_id=$(mrpack-conatiner "tests/mrpacks/${{ matrix.mrpackfile }}" --stdout | podman load)
-        podman tag $container_id localhost/minecraft
+          container_id=$(mrpack-conatiner "tests/mrpacks/${{ matrix.mrpackfile }}" --stdout | podman load)
+          podman tag $container_id localhost/minecraft
       - run: |
           echo "eula=true" > /tmp/eula.txt
           podman run \
