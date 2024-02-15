@@ -1,0 +1,43 @@
+name: End to End Test
+
+on:
+  push: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          rustup update --no-self-update stable
+          rustup component add --toolchain stable rustfmt
+          rustup default stable
+      - run: cargo build --release --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary
+          path: target/release/mrpack-container
+  e2e:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        mrpackfile: [quilt-simple.mrpack]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact
+        with:
+          name: binary
+      - run: mv target/release/mrpack-contianer /usr/local/bin/mrpack-container
+      - run: |
+        container_id=$(mrpack-conatiner "tests/mrpacks/${{ matrix.mrpackfile }}" --stdout | podman load)
+        podman tag $container_id localhost/minecraft
+      - run: |
+          echo "eula=true" > /tmp/eula.txt
+          podman run \
+            --mount type=bind,source=/tmp/eula.txt,target=/opt/minecraft/eula.txt \
+            localhost/minecraft:latest
+      - run: python3 -m pip install mcstatus
+      - run: 60
+      - run: mcstatus localhost status
+
+
