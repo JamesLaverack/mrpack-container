@@ -26,8 +26,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: binary
-      - run: mv target/release/mrpack-contianer /usr/local/bin/mrpack-container
+          path: /usr/local/bin
+          merge-multiple: true
       - run: |
           container_id=$(mrpack-conatiner "tests/mrpacks/${{ matrix.mrpackfile }}" --stdout | podman load)
           podman tag $container_id localhost/minecraft
