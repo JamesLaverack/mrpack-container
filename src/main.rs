@@ -29,6 +29,7 @@ mod modloaders;
 use modloaders::{fabric, forge, quilt};
 mod mojang;
 mod packfile;
+mod adoptium;
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -222,9 +223,12 @@ async fn main() -> anyhow::Result<()> {
     extract_overrides(&mut zipfile, &minecraft_dir, "overrides")?;
     extract_overrides(&mut zipfile, &minecraft_dir, "server-overrides")?;
 
-    // Grab a JVM
-
-
+    // Grab a JRE
+    let jre_download = adoptium::get_jre_download(java_version, &args.arch).await?;
+    info!(
+        url = jre_download.url.to_string(),
+        sha256 = hex::encode_upper(jre_download.sha256),
+        "Got JRE download info");
 
     if args.skip_container {
         warn!(
