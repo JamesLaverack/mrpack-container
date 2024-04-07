@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256, Sha512};
 use std::io;
 use std::io::Write;
 use std::path::Path;
+use std::process;
 use std::{collections::HashMap, fs};
 use std::{collections::HashSet, fs::File};
 use tar::Builder;
@@ -44,8 +45,8 @@ struct Args {
     #[arg(long, help = "Container Architecture", default_value = "amd64")]
     arch: String,
 
-    #[arg(long, help = "Container OS", default_value = "linux")]
-    os: String,
+    #[arg(long, help = "Skip creating the container, for debug purposes only")]
+    skip_container: bool,
 }
 
 #[derive(Error, Debug)]
@@ -90,6 +91,8 @@ fn extract_overrides<R: std::io::Read + std::io::Seek>(
     }
     Ok(())
 }
+
+const OS: &str = "linux";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -219,6 +222,18 @@ async fn main() -> anyhow::Result<()> {
     extract_overrides(&mut zipfile, &minecraft_dir, "overrides")?;
     extract_overrides(&mut zipfile, &minecraft_dir, "server-overrides")?;
 
+    // Grab a JVM
+
+
+
+    if args.skip_container {
+        warn!(
+            dir = &minecraft_dir.as_os_str().to_str().unwrap(),
+            "Skipping container creation"
+        );
+        process::exit(-1);
+    }
+
     // Write as new layer
     info!("Creating new layer tarball");
     let oci_archive_dir = tempdir()?;
@@ -256,7 +271,7 @@ async fn main() -> anyhow::Result<()> {
     // Download the rest of the container image layers
 
     // Clone the os/arch and move them into the closure for lifetime reasons
-    let osc = args.os.clone();
+    let osc = OS.clone();
     let archc = args.arch.clone();
     let client_config = ClientConfig {
         platform_resolver: Some(Box::new(move |manifests| {
@@ -272,14 +287,9 @@ async fn main() -> anyhow::Result<()> {
         ..Default::default()
     };
     let mut registry_client = Client::new(client_config);
-    // TODO Allow image override
-    let base_image_ref: Reference = format!(
-        "docker.io/eclipse-temurin:{}-jre",
-        java_version.major_version
-    )
-    .parse()?;
+    // We grab a distroless base image. Just glibc, libssl, ca-certs, and a few basics.
+    let base_image_ref: Reference = "gcr.io/distroless/static:nonroot".parse()?;
     info!(
-        java_version = java_version.major_version,
         base_image = base_image_ref.whole().as_str(),
         "Determined base container image"
     );
@@ -425,7 +435,7 @@ async fn main() -> anyhow::Result<()> {
         path = manifest_tmp_file_path.as_os_str().to_str().unwrap(),
         len_bytes = manifest_bytes.len(),
         hash = hex::encode_upper(manifest_checksum),
-        os = args.os,
+        os = OS,
         arch = args.arch,
         "Wrote image manifest"
     );
@@ -440,7 +450,7 @@ async fn main() -> anyhow::Result<()> {
             digest: format!("sha256:{}", hex::encode(manifest_checksum)),
             platform: Some(oci_distribution::manifest::Platform {
                 architecture: args.arch,
-                os: args.os,
+                os: OS.to_string(),
                 os_version: None,
                 os_features: None,
                 variant: None,
@@ -450,7 +460,10 @@ async fn main() -> anyhow::Result<()> {
         }],
         annotations: Some(HashMap::from([
             ("org.opencontainers.image.ref.name".to_string(), index.name),
-            ("org.opencontainers.image.base.name".to_string(), base_image_ref.to_string()),
+            (
+                "org.opencontainers.image.base.name".to_string(),
+                base_image_ref.to_string(),
+            ),
         ])),
     };
     let index_string = serde_json::to_string(&index)?;
