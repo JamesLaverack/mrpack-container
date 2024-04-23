@@ -1,9 +1,68 @@
 use digest::Digest;
-use std::io::{Result, Write};
+use std::io::{Error, Result, Write};
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use sha2::Sha256;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 pub struct HashWriter<W: Write, D: Digest> {
     write: W,
     digest: D,
+}
+
+pub struct HashWriterAsync<AW: AsyncWrite, D: Digest> {
+    inner: AW,
+    digest: D,
+}
+
+impl<AW: AsyncWrite, D: Digest> AsyncWrite for HashWriterAsync<AW, D> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::result::Result<usize, Error>> {
+        self.digest.update(buf);
+        self.inner.poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::result::Result<(), Error>> {
+        self.inner.poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::result::Result<(), Error>> {
+        self.inner.poll_shutdown(cx)
+    }
+}
+
+impl<AW: AsyncWrite, D: Digest> HashWriterAsync<AW, D> {
+    pub fn new(self, digest: D, writer: AW) -> HashWriterAsync<AW, D> {
+        return HashWriterAsync {
+            digest,
+            inner: writer,
+        };
+    }
+    pub async fn into_inner(mut self) -> (AW, digest::Output<D>) {
+        return (self.inner, self.digest.finalize())
+    }
+}
+
+impl<AW: AsyncWrite> HashWriterAsync<AW, Sha256> {
+    pub fn new(self, writer: Box<dyn AsyncWrite>) -> HashWriterAsync<AW, Sha256> {
+        return HashWriterAsync{
+            digest: Sha256::new(),
+            inner: writer,
+        }
+    }
+
+    pub async fn into_inner(mut self) -> (AW, [u8; 32]) {
+        return (self.inner, self.digest.finalize().into())
+    }
 }
 
 /// Construct a new HashWriter from the given writer and digest.
