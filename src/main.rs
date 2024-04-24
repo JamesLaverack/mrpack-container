@@ -1,8 +1,13 @@
 use anyhow::bail;
+use async_compression::tokio::bufread::GzipDecoder;
+use async_compression::tokio::write::GzipEncoder;
 use chrono::prelude::Utc;
 use clap::Parser;
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use futures::io::ErrorKind;
+use futures::prelude::*;
+use futures_util::StreamExt;
 use oci_distribution::{
     client::ClientConfig, config::ConfigFile, manifest::OciDescriptor, secrets::RegistryAuth,
     Client, Reference,
@@ -13,6 +18,7 @@ use std::io;
 use std::io::Write;
 use std::path::Path;
 use std::process;
+use std::time::UNIX_EPOCH;
 use std::{collections::HashMap, fs};
 use std::{collections::HashSet, fs::File};
 use tar::Builder;
@@ -25,11 +31,15 @@ use tracing_subscriber;
 mod download;
 mod hash_writer;
 mod modloaders;
+use crate::layer::TarLayerBuilder;
+use crate::modloaders::JavaConfig;
 #[allow(unused_imports)]
 use modloaders::{fabric, forge, quilt};
+
+mod adoptium;
+mod layer;
 mod mojang;
 mod packfile;
-mod adoptium;
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -146,89 +156,150 @@ async fn main() -> anyhow::Result<()> {
 
     // Get the Vanilla Minecraft server jar
     // Most installs will expect this to be downloaded as server.jar
-    let minecraft_vanilla_jar = minecraft_dir.join("server.jar");
-    let java_version =
-        mojang::download_server_jar(minecraft_vanilla_jar.clone(), &index.dependencies.minecraft)
-            .await?;
-
-    // Install the mod loader
-    // The way we need to configure the container later will depend on the mod loader. So we'll get
-    // a configuration function back
-    let java_config;
-    if let Some(_fabric_version) = &index.dependencies.fabric_loader {
-        anyhow::bail!("fabric not supported");
-    } else if let Some(quilt_version) = &index.dependencies.quilt_loader {
-        java_config = quilt::download_quilt(
-            minecraft_dir.into(),
+    if false {
+        let minecraft_vanilla_jar = minecraft_dir.join("server.jar");
+        let java_version = mojang::download_server_jar(
+            minecraft_vanilla_jar.clone(),
             &index.dependencies.minecraft,
-            &quilt_version,
         )
         .await?;
-    } else if let Some(_forge_version) = &index.dependencies.forge {
-        anyhow::bail!("forge not supported");
-    } else if let Some(_neoforge_version) = &index.dependencies.neoforge {
-        anyhow::bail!("neoforge not supported");
-    } else {
-        anyhow::bail!("No supported modloader found");
-        // TODO support pure vanilla installs?
-    }
 
-    // Install downloads, usually mods
-    if let Some(files) = index.files {
-        for mrfile in files {
-            if let Some(env) = mrfile.env {
-                match env.server {
-                    EnvType::Required => {}
-                    EnvType::Optional => {
-                        info!(path = mrfile.path, "including optional server-side mod");
-                    }
-                    EnvType::Unsupported => {
-                        info!(path = mrfile.path, "skipping unsupported server-side mod");
-                        continue;
+        // Install the mod loader
+        // The way we need to configure the container later will depend on the mod loader. So we'll get
+        // a configuration function back
+        let java_config;
+        if let Some(_fabric_version) = &index.dependencies.fabric_loader {
+            anyhow::bail!("fabric not supported");
+        } else if let Some(quilt_version) = &index.dependencies.quilt_loader {
+            java_config = quilt::download_quilt(
+                minecraft_dir.into(),
+                &index.dependencies.minecraft,
+                &quilt_version,
+            )
+            .await?;
+        } else if let Some(_forge_version) = &index.dependencies.forge {
+            anyhow::bail!("forge not supported");
+        } else if let Some(_neoforge_version) = &index.dependencies.neoforge {
+            anyhow::bail!("neoforge not supported");
+        } else {
+            anyhow::bail!("No supported modloader found");
+            // TODO support pure vanilla installs?
+        }
+
+        // Install downloads, usually mods
+        if let Some(files) = index.files {
+            for mrfile in files {
+                if let Some(env) = mrfile.env {
+                    match env.server {
+                        EnvType::Required => {}
+                        EnvType::Optional => {
+                            info!(path = mrfile.path, "including optional server-side mod");
+                        }
+                        EnvType::Unsupported => {
+                            info!(path = mrfile.path, "skipping unsupported server-side mod");
+                            continue;
+                        }
                     }
                 }
-            }
-            if mrfile.downloads.len() == 0 {
-                bail!("File had no provided download URLs")
-            }
-            let u = mrfile.downloads.get(0).unwrap().as_str();
-            let request = reqwest::get(u).await?;
-            // TODO check for path injection here
-            let path = minecraft_dir.join(&mrfile.path);
-            fs::create_dir_all(&path.parent().unwrap())?;
+                if mrfile.downloads.len() == 0 {
+                    bail!("File had no provided download URLs")
+                }
+                let u = mrfile.downloads.get(0).unwrap().as_str();
+                let request = reqwest::get(u).await?;
+                // TODO check for path injection here
+                let path = minecraft_dir.join(&mrfile.path);
+                fs::create_dir_all(&path.parent().unwrap())?;
 
-            let mut hasher = hash_writer::new(File::create(&path)?, Sha512::new());
-            let size = download::stream_to_writer(request.bytes_stream(), &mut hasher).await?;
-            let checksum = hasher.finalize_bytes();
+                let mut hasher = hash_writer::new(File::create(&path)?, Sha512::new());
+                let size = download::stream_to_writer(request.bytes_stream(), &mut hasher).await?;
+                let checksum = hasher.finalize_bytes();
 
-            if checksum != mrfile.hashes.sha512 {
-                error!(
-                    expected_sha512 = hex::encode_upper(mrfile.hashes.sha512),
-                    actual_sha512 = hex::encode_upper(checksum),
+                if checksum != mrfile.hashes.sha512 {
+                    error!(
+                        expected_sha512 = hex::encode_upper(mrfile.hashes.sha512),
+                        actual_sha512 = hex::encode_upper(checksum),
+                        path = mrfile.path,
+                        url = u,
+                        "SHA512 checksum did not match!"
+                    );
+                    bail!("Checksum validation failure");
+                }
+                info!(
+                    size_bytes = size,
+                    //sha512 = format!("{:X}", &checksum),
                     path = mrfile.path,
                     url = u,
-                    "SHA512 checksum did not match!"
+                    "Downloaded file"
                 );
-                bail!("Checksum validation failure");
             }
-            info!(
-                size_bytes = size,
-                //sha512 = format!("{:X}", &checksum),
-                path = mrfile.path,
-                url = u,
-                "Downloaded file"
-            );
         }
+        extract_overrides(&mut zipfile, &minecraft_dir, "overrides")?;
+        extract_overrides(&mut zipfile, &minecraft_dir, "server-overrides")?;
+
+        // Write as new layer
+        info!("Creating new layer tarball");
+        let oci_archive_dir = tempdir()?;
+        let oci_blob_dir = oci_archive_dir.path().join("blobs").join("sha256");
+        fs::create_dir_all(&oci_blob_dir)?;
+        info!(
+            path = oci_archive_dir.path().as_os_str().to_str().unwrap(),
+            "Assembling new container as oci-archive"
+        );
     }
-    extract_overrides(&mut zipfile, &minecraft_dir, "overrides")?;
-    extract_overrides(&mut zipfile, &minecraft_dir, "server-overrides")?;
+    let java_version = mojang::JavaVersion { major_version: 17 };
+    warn!(
+        java_version = java_version.major_version,
+        "Hardcoding Java version"
+    );
+    let oci_archive_dir = tempdir()?;
+    let oci_blob_dir = oci_archive_dir.path().join("blobs").join("sha256");
+    fs::create_dir_all(&oci_blob_dir)?;
+    info!(
+        path = oci_archive_dir.path().as_os_str().to_str().unwrap(),
+        "Assembling new container as oci directory"
+    );
 
     // Grab a JRE
     let jre_download = adoptium::get_jre_download(java_version, &args.arch).await?;
     info!(
         url = jre_download.url.to_string(),
         sha256 = hex::encode_upper(jre_download.sha256),
-        "Got JRE download info");
+        "Got JRE download info"
+    );
+
+    // Download and stream into a layer
+    let request = reqwest::get(jre_download.url).await?;
+    let length = &request.content_length().unwrap();
+    info!(expected_length = length, "Starting download");
+    let decoder = tokio_util::io::StreamReader::new(
+        request
+            .bytes_stream()
+            .map_err(|e| io::Error::new(ErrorKind::Other, e)),
+    );
+    let mut jre_layer = TarLayerBuilder::new(&oci_blob_dir).await?;
+    jre_layer
+        .append_file(
+            &layer::FileInfo {
+                path: "test.tar".into(),
+                mode: 0x0755,
+                uid: 0,
+                gid: 0,
+                last_modified: 0,
+            },
+            *length,
+            decoder,
+        )
+        .await?;
+    info!(
+        expected_length = length,
+        "JRE download complete, finalising layer"
+    );
+    let l = jre_layer.finalise().await?;
+    info!(
+        path = l.blob_path.as_os_str().to_str().unwrap(),
+        checksum = hex::encode(l.sha256_checksum),
+        "layer assembled"
+    );
 
     if args.skip_container {
         warn!(
@@ -237,16 +308,10 @@ async fn main() -> anyhow::Result<()> {
         );
         process::exit(-1);
     }
-
-    // Write as new layer
-    info!("Creating new layer tarball");
-    let oci_archive_dir = tempdir()?;
-    let oci_blob_dir = oci_archive_dir.path().join("blobs").join("sha256");
-    fs::create_dir_all(&oci_blob_dir)?;
-    info!(
-        path = oci_archive_dir.path().as_os_str().to_str().unwrap(),
-        "Assembling new container as oci-archive"
-    );
+    let java_config = JavaConfig {
+        jars: vec![],
+        main_class: "".to_string(),
+    };
 
     let layer_tmp_path = oci_blob_dir.join("tmp.tar.gz");
     let mut layer_hasher = hash_writer::new(File::create(&layer_tmp_path)?, Sha256::new());
