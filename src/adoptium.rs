@@ -14,6 +14,7 @@ pub struct JREDownload {
 fn adoptium_arch(arch: &str) -> &str {
     match arch {
         "amd64" => "x64",
+        "arm64" => "aarch64",
         a => a,
     }
 }
@@ -34,12 +35,12 @@ pub async fn get_jre_download(
     )?;
     path.query_pairs_mut()
         .clear()
-        .append_pair("os", "linux")
+        .append_pair("os", "alpine-linux")
         .append_pair("architecture", adoptium_arch(&arch))
         .append_pair("image_type", "jre");
     info!(
         url = path.to_string(),
-        "Requesting JRE information from adoptium"
+        "Requesting JRE information from Eclipse Adoptium"
     );
     let request = reqwest::get(path).await?;
     let response: serde_json::Value = serde_json::from_str(&request.text().await?)?;
@@ -59,3 +60,4 @@ pub async fn get_jre_download(
         sha256: checksum,
     });
 }
+

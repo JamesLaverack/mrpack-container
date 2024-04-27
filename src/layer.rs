@@ -5,16 +5,20 @@ use anyhow::Context;
 use async_compression::tokio::write::GzipEncoder;
 use chrono::DateTime;
 use digest::Digest;
+use futures_util::TryStreamExt;
 use rand::distributions::{Alphanumeric, DistString};
 use sha2::Sha256;
-use std::io;
+use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::{default, io};
 use tokio::fs::File;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
+use tracing::debug;
+use url::Url;
 
 #[derive(thiserror::Error, Debug)]
 pub enum LayerBuilderError {
@@ -29,10 +33,18 @@ pub enum LayerBuilderError {
         actual: u64,
         path: PathBuf,
     },
+    #[error("File cannot be empty")]
+    EmptyFile {
+        path: PathBuf,
+    },
     #[error("Path '{path}' for tar entry was invalid")]
     InvalidPath {
         path: PathBuf,
         source: io::Error,
+    },
+    #[error("Path '{path}' was not an absolute path")]
+    RelativePath {
+        path: PathBuf,
     },
     #[error("Failed to write to tar file '{path}'")]
     TmpFileWrite {
@@ -45,13 +57,56 @@ pub enum LayerBuilderError {
         to_path: PathBuf,
         source: io::Error,
     },
+    #[error("Failed to download file from {url}")]
+    HttpDownloadError {
+        url: url::Url,
+        source: reqwest::Error,
+    },
 }
+
+#[derive(Default)]
 pub struct FileInfo {
     pub path: PathBuf,
     pub mode: u32,
     pub uid: u64,
     pub gid: u64,
     pub last_modified: u64,
+}
+
+pub struct FileInfoBuilder {
+    file_info: FileInfo,
+}
+
+impl FileInfoBuilder {
+    pub fn build(path: &Path) -> FileInfoBuilder {
+        return FileInfoBuilder {
+            file_info: FileInfo {
+                path: path.to_path_buf(),
+                ..Default::default()
+            },
+        };
+    }
+    pub fn root(mut self) -> FileInfoBuilder {
+        self.file_info.uid = 0;
+        self.file_info.gid = 0;
+        return self;
+    }
+
+    pub fn read_only(mut self) -> FileInfoBuilder {
+        self.file_info.mode &= 0x0644;
+        return self;
+    }
+
+    pub fn executable(mut self) -> FileInfoBuilder {
+        self.file_info.mode &= 0x0111;
+        return self;
+    }
+}
+
+impl Into<FileInfo> for FileInfoBuilder {
+    fn into(self) -> FileInfo {
+        return self.file_info;
+    }
 }
 
 pub struct TarLayerBuilder {
@@ -87,15 +142,98 @@ impl TarLayerBuilder {
         self.tmp_tarfile_path.as_path()
     }
 
+    pub async fn append_file_from_url<D: Digest>(
+        &mut self,
+        file_info: &FileInfo,
+        url: &Url,
+        hasher: D,
+    ) -> Result<digest::Output<D>, LayerBuilderError> {
+        let request =
+            reqwest::get(url.clone())
+                .await
+                .map_err(|s| LayerBuilderError::HttpDownloadError {
+                    url: url.clone(),
+                    source: s,
+                })?;
+        let expected_size = request.content_length().unwrap();
+        let mut stream = hash_writer::HashReaderAsync::new(
+            hasher,
+            tokio_util::io::StreamReader::new(
+                request
+                    .bytes_stream()
+                    .map_err(|e| io::Error::new(ErrorKind::Other, e)),
+            ),
+        );
+        self.append_file(&file_info, expected_size, &mut stream)
+            .await?;
+        let (_, output) = stream.into_inner();
+        return Ok(output);
+    }
+
+    pub async fn append_directory(
+        &mut self,
+        file_info: &FileInfo,
+    ) -> Result<(), LayerBuilderError> {
+        let mut header = tar::Header::new_ustar();
+        let path =
+            file_info
+                .path
+                .strip_prefix("/")
+                .map_err(|s| LayerBuilderError::RelativePath {
+                    path: file_info.path.clone(),
+                })?;
+        header
+            .set_path(path)
+            .map_err(|s| LayerBuilderError::InvalidPath {
+                path: file_info.path.clone(),
+                source: s,
+            })?;
+        header.set_mode(file_info.mode);
+        header.set_uid(file_info.uid);
+        header.set_gid(file_info.gid);
+        header.set_mtime(file_info.last_modified);
+        header.set_size(0);
+        header.set_entry_type(tar::EntryType::Directory);
+        header.set_cksum();
+
+        self.writer.write(header.as_bytes()).await.map_err(|s| {
+            LayerBuilderError::TmpFileWrite {
+                path: self.tmp_tarfile_path.clone(),
+                source: s,
+            }
+        })?;
+        debug!(
+            path = path.as_os_str().to_str().unwrap(),
+            gid = file_info.gid,
+            uid = file_info.uid,
+            mode = format!("{:#o}", &header.mode().unwrap()),
+            last_modified_time = file_info.last_modified,
+            "Wrote directory to TAR archive",
+        );
+        Ok(())
+    }
+
     pub async fn append_file<R: AsyncRead + std::marker::Unpin>(
         &mut self,
         file_info: &FileInfo,
         file_size: u64,
-        mut bytes: R,
+        bytes: &mut R,
     ) -> Result<(), LayerBuilderError> {
-        let mut header = tar::Header::new_gnu();
+        if file_size == 0 {
+            return Err(LayerBuilderError::EmptyFile {
+                path: file_info.path.clone(),
+            });
+        }
+        let path =
+            file_info
+                .path
+                .strip_prefix("/")
+                .map_err(|s| LayerBuilderError::RelativePath {
+                    path: file_info.path.clone(),
+                })?;
+        let mut header = tar::Header::new_ustar();
         header
-            .set_path(&file_info.path)
+            .set_path(path)
             .map_err(|s| LayerBuilderError::InvalidPath {
                 path: file_info.path.clone(),
                 source: s,
@@ -114,12 +252,12 @@ impl TarLayerBuilder {
                 source: s,
             }
         })?;
-        let written = tokio::io::copy(&mut bytes, &mut self.writer).await.map_err(|s| {
-            LayerBuilderError::TmpFileWrite {
+        let written = tokio::io::copy(bytes, &mut self.writer)
+            .await
+            .map_err(|s| LayerBuilderError::TmpFileWrite {
                 path: self.tmp_tarfile_path.clone(),
                 source: s,
-            }
-        })?;
+            })?;
 
         if written != file_size {
             // TODO close the file first?
@@ -142,7 +280,20 @@ impl TarLayerBuilder {
                     source: s,
                 })?;
         }
+        let padding = if remaining == 512 { 0 } else { remaining };
 
+        debug!(
+            path = path.as_os_str().to_str().unwrap(),
+            gid = file_info.gid,
+            uid = file_info.uid,
+            mode = format!("{:#o}", &header.mode().unwrap()),
+            last_modified_time = file_info.last_modified,
+            file_size = file_size,
+            padding_size = padding,
+            total_size = file_size + padding,
+            blocks = (file_size + padding) / 512,
+            "Wrote file to TAR archive",
+        );
         Ok(())
     }
 
@@ -151,9 +302,16 @@ impl TarLayerBuilder {
         file_info: &FileInfo,
         target: &Path,
     ) -> Result<(), LayerBuilderError> {
-        let mut header = tar::Header::new_gnu();
+        let path =
+            file_info
+                .path
+                .strip_prefix("/")
+                .map_err(|s| LayerBuilderError::RelativePath {
+                    path: file_info.path.clone(),
+                })?;
+        let mut header = tar::Header::new_ustar();
         header
-            .set_path(&file_info.path)
+            .set_path(path)
             .map_err(|s| LayerBuilderError::InvalidPath {
                 path: file_info.path.clone(),
                 source: s,
@@ -169,12 +327,23 @@ impl TarLayerBuilder {
                 path: target.to_path_buf(),
                 source: s,
             })?;
+        header.set_cksum();
+
         self.writer.write(header.as_bytes()).await.map_err(|s| {
             LayerBuilderError::TmpFileWrite {
                 path: self.tmp_tarfile_path.clone(),
                 source: s,
             }
         })?;
+        debug!(
+            path = path.as_os_str().to_str().unwrap(),
+            gid = file_info.gid,
+            uid = file_info.uid,
+            mode = format!("{:#o}", &header.mode().unwrap()),
+            last_modified_time = file_info.last_modified,
+            target = target.as_os_str().to_str().unwrap(),
+            "Wrote symlink to TAR archive",
+        );
         Ok(())
     }
 
@@ -187,7 +356,8 @@ impl TarLayerBuilder {
                 path: self.tmp_tarfile_path.clone(),
                 source: s,
             })?;
-        self.writer.shutdown()
+        self.writer
+            .shutdown()
             .await
             .map_err(|s| LayerBuilderError::TmpFileWrite {
                 path: self.tmp_tarfile_path.clone(),
@@ -204,6 +374,11 @@ impl TarLayerBuilder {
                 to_path: tarfile_path.clone(),
                 source: s,
             })?;
+        debug!(
+            blob_path = tarfile_path.as_os_str().to_str().unwrap(),
+            sha256_checksum = hex::encode_upper(sha256),
+            "Finished layer"
+        );
         Ok(Layer {
             blob_path: tarfile_path,
             sha256_checksum: sha256,

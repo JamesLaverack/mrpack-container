@@ -1,4 +1,4 @@
-use anyhow::bail;
+use anyhow::{bail, Context};
 use async_compression::tokio::bufread::GzipDecoder;
 use async_compression::tokio::write::GzipEncoder;
 use chrono::prelude::Utc;
@@ -13,19 +13,21 @@ use oci_distribution::{
     Client, Reference,
 };
 use packfile::EnvType;
+use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha512};
 use std::io;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process;
 use std::time::UNIX_EPOCH;
 use std::{collections::HashMap, fs};
 use std::{collections::HashSet, fs::File};
-use tar::Builder;
+use tar::{Builder, EntryType};
 use tempfile::tempdir;
 use thiserror::Error;
+use tokio::io::AsyncReadExt;
 #[allow(unused_imports)]
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 use tracing_subscriber;
 
 mod download;
@@ -40,24 +42,35 @@ mod adoptium;
 mod layer;
 mod mojang;
 mod packfile;
-
 #[derive(Parser)]
 #[command(version, about)]
 struct Args {
     #[arg(help = "Path to the Modrinth Modpack file")]
     mr_pack_file: String,
 
-    #[arg(short, long, help = "Output file")]
-    output_file: Option<String>,
-
-    #[arg(short, long, help = "Emit to STDOUT")]
-    stdout: bool,
+    #[arg(help = "Output directory")]
+    output_dir: String,
 
     #[arg(long, help = "Container Architecture", default_value = "amd64")]
     arch: String,
 
+    #[arg(long, help = "Fixed Java version")]
+    java_version: Option<String>,
+
+    #[arg(long, help = "Write a EULA acceptance file into the container")]
+    accept_eula: bool,
+
+    #[arg(
+        long,
+        help = "Include the Minecraft server JAR. It's important to remember that with this included the Minecraft EULA forbids you from distributing the resulting contianer."
+    )]
+    include_mojang_property: bool,
+
     #[arg(long, help = "Skip creating the container, for debug purposes only")]
     skip_container: bool,
+
+    #[arg(long, help = "Debug logging output")]
+    debug: bool,
 }
 
 #[derive(Error, Debug)]
@@ -107,16 +120,16 @@ const OS: &str = "linux";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
     let subscriber = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
+        .with_max_level(if args.debug {
+            tracing::Level::DEBUG
+        } else {
+            tracing::Level::INFO
+        })
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
-
-    let args = Args::parse();
-    if !args.stdout && args.output_file.is_none() {
-        error!("One of --stdout or --output-file required");
-        anyhow::bail!("One of --stdout or --output-file required");
-    }
     info!("Running mrpack-container");
 
     let created_timestamp = Utc::now();
@@ -129,6 +142,7 @@ async fn main() -> anyhow::Result<()> {
     // TODO Support reading from HTTPS
     // TODO Support reading from S3
     // TODO Support reading from Modrinth with modrinth:// or something?
+    // TODO Support streaming this, instead of requiring the whole file in one?
     let mut zipfile = zip::ZipArchive::new(File::open(path)?)?;
     let index_file = match zipfile.by_name("modrinth.index.json") {
         Ok(file) => file,
@@ -145,17 +159,98 @@ async fn main() -> anyhow::Result<()> {
         "Loaded Modrinth modpack file"
     );
 
-    // Make a temp dir which will be where we put everything that we're going to make on the
-    // filesystem in the container.
-    let dir = tempdir()?;
-    let minecraft_dir = dir.path();
+    // Ensure the output directory exists
+    let oci_archive_dir: PathBuf = args.output_dir.into();
+    let oci_blob_dir = oci_archive_dir.join("blobs").join("sha256");
+    fs::create_dir_all(&oci_blob_dir)?;
     info!(
-        path = minecraft_dir.as_os_str().to_str().unwrap(),
-        "Assembling Minecraft container layer"
+        path = oci_archive_dir.as_os_str().to_str().unwrap(),
+        blob_dir = oci_blob_dir.as_os_str().to_str().unwrap(),
+        "Assembling new container as oci container"
     );
+
+    let manifest = mojang::download_manifest(&index.dependencies.minecraft).await?;
+    info!(
+        minecraft_version = &index.dependencies.minecraft,
+        java_major_version = &manifest.java_version.major_version,
+        "Retrieved Minecraft version information from Mojang"
+    );
+    if args.include_mojang_property {
+        match manifest.downloads.server {
+            None => anyhow::bail!("Server download unavailable"),
+            Some(server_download) => {
+                let mut server_jar_layer = TarLayerBuilder::new(&oci_blob_dir).await?;
+                debug!(
+                    url = &server_download.url.as_str(),
+                    sha1 = hex::encode_upper(&server_download.sha1),
+                    minecraft_version = &index.dependencies.minecraft,
+                    "Downloading Minecraft server JAR..."
+                );
+                let digest: [u8; 20] = server_jar_layer
+                    .append_file_from_url(
+                        &layer::FileInfo {
+                            path: "server.jar".into(),
+                            mode: 0o644,
+                            uid: 0,
+                            gid: 0,
+                            last_modified: 0,
+                        },
+                        &server_download.url,
+                        Sha1::new(),
+                    )
+                    .await?
+                    .into();
+                if digest != server_download.sha1 {
+                    error!(
+                        expected_sha1 = hex::encode_upper(server_download.sha1),
+                        actual_sha1 = hex::encode_upper(digest),
+                        minecraft_version = &index.dependencies.minecraft,
+                        url = server_download.url.as_str(),
+                        "server.jar SHA1 checksum did not match!"
+                    );
+                    anyhow::bail!("Checksum validation failure");
+                }
+                let l = server_jar_layer.finalise().await?;
+                info!(
+                    version = &index.dependencies.minecraft,
+                    sha1 = hex::encode_upper(digest),
+                    url = server_download.url.as_str(),
+                    layer_path = l.blob_path.as_os_str().to_str().unwrap(),
+                    "Created Minecraft server layer (NOTE: Includes Mojang property)"
+                );
+            }
+        }
+    } else {
+        info!("Not including Mojang's vanilla server jar. Your modloader will download this at runtime.")
+    }
+
+    // Install the mod loader
+    // The way we need to configure the container later will depend on the mod loader. So we'll get
+    // a configuration function back
+    let java_config;
+    if let Some(_fabric_version) = &index.dependencies.fabric_loader {
+        anyhow::bail!("fabric not supported");
+    } else if let Some(quilt_version) = &index.dependencies.quilt_loader {
+        info!(quilt_version = &quilt_version, "Using Quilt modloader");
+        java_config = quilt::build_quilt_layer(
+            &oci_blob_dir,
+            Path::new("/opt/minecraft/"),
+            &index.dependencies.minecraft,
+            &quilt_version,
+        )
+        .await?;
+    } else if let Some(_forge_version) = &index.dependencies.forge {
+        anyhow::bail!("forge not supported");
+    } else if let Some(_neoforge_version) = &index.dependencies.neoforge {
+        anyhow::bail!("neoforge not supported");
+    } else {
+        anyhow::bail!("No supported modloader found");
+        // TODO support pure vanilla installs?
+    }
 
     // Get the Vanilla Minecraft server jar
     // Most installs will expect this to be downloaded as server.jar
+    /*
     if false {
         let minecraft_vanilla_jar = minecraft_dir.join("server.jar");
         let java_version = mojang::download_server_jar(
@@ -239,28 +334,17 @@ async fn main() -> anyhow::Result<()> {
         // Write as new layer
         info!("Creating new layer tarball");
         let oci_archive_dir = tempdir()?;
-        let oci_blob_dir = oci_archive_dir.path().join("blobs").join("sha256");
+        let oci_blob_dir = oci_archive_dir.join("blobs").join("sha256");
         fs::create_dir_all(&oci_blob_dir)?;
         info!(
-            path = oci_archive_dir.path().as_os_str().to_str().unwrap(),
+            path = oci_archive_dir.as_os_str().to_str().unwrap(),
             "Assembling new container as oci-archive"
         );
     }
-    let java_version = mojang::JavaVersion { major_version: 17 };
-    warn!(
-        java_version = java_version.major_version,
-        "Hardcoding Java version"
-    );
-    let oci_archive_dir = tempdir()?;
-    let oci_blob_dir = oci_archive_dir.path().join("blobs").join("sha256");
-    fs::create_dir_all(&oci_blob_dir)?;
-    info!(
-        path = oci_archive_dir.path().as_os_str().to_str().unwrap(),
-        "Assembling new container as oci directory"
-    );
 
+     */
     // Grab a JRE
-    let jre_download = adoptium::get_jre_download(java_version, &args.arch).await?;
+    let jre_download = adoptium::get_jre_download(manifest.java_version, &args.arch).await?;
     info!(
         url = jre_download.url.to_string(),
         sha256 = hex::encode_upper(jre_download.sha256),
@@ -270,73 +354,177 @@ async fn main() -> anyhow::Result<()> {
     // Download and stream into a layer
     let request = reqwest::get(jre_download.url).await?;
     let length = &request.content_length().unwrap();
-    info!(expected_length = length, "Starting download");
-    let decoder = tokio_util::io::StreamReader::new(
+    let mut jre_tar_stream = GzipDecoder::new(tokio_util::io::StreamReader::new(
         request
             .bytes_stream()
             .map_err(|e| io::Error::new(ErrorKind::Other, e)),
-    );
+    ));
+    let container_path = Path::new("/usr/local/java");
     let mut jre_layer = TarLayerBuilder::new(&oci_blob_dir).await?;
+    loop {
+        trace!("Reading from TAR stream");
+        // Read a TAR header
+        let mut header_bytes: [u8; 512] = [0; 512];
+        (&mut jre_tar_stream).read_exact(&mut header_bytes).await?;
+        if header_bytes == [0; 512] {
+            debug!("Read 512 nil bytes, end of stream");
+            break;
+        }
+        let header = tar::Header::from_byte_slice(&header_bytes);
+        let size = header.size().context("Header had invalid size")?;
+        let path = header.path().context("Header had invalid path")?;
+        let entry_type = header.entry_type();
+        debug!(
+            size = size,
+            path = path.as_os_str().to_str(),
+            "Parsed TAR header"
+        );
+        let mut p = container_path.to_path_buf();
+        p.push(path.iter().skip(1).collect::<PathBuf>());
+        match entry_type {
+            EntryType::Directory => {
+                jre_layer
+                    .append_directory(&layer::FileInfo {
+                        path: p,
+                        mode: 0o755,
+                        uid: 0,
+                        gid: 0,
+                        last_modified: 0,
+                    })
+                    .await?;
+            }
+            EntryType::Regular => {
+                let file_size = header.size()?;
+                let upstream_mode = header.mode()?;
+                debug!(
+                    upstream = format!("{:#o}", upstream_mode),
+                    and = format!("{:#o}", upstream_mode & 0o100),
+                    "Upstream mode"
+                );
+                let mode = if upstream_mode & 0o100 > 0 {
+                    // Executable
+                    0o0755
+                } else {
+                    // Not executable
+                    0o0644
+                };
+                jre_layer
+                    .append_file(
+                        &layer::FileInfo {
+                            path: p,
+                            mode,
+                            uid: 0,
+                            gid: 0,
+                            last_modified: 0,
+                        },
+                        file_size,
+                        &mut (&mut jre_tar_stream).take(size),
+                    )
+                    .await?;
+                // Read the padding bytes from the stream
+                let remaining = 512 - (file_size % 512) as usize;
+                if remaining < 512 {
+                    let mut padding_bytes: [u8; 512] = [0; 512];
+                    (&mut jre_tar_stream)
+                        .read_exact(&mut padding_bytes[..remaining])
+                        .await?;
+                    if padding_bytes != [0; 512] {
+                        warn!(
+                            padding_bytes = remaining,
+                            read_bytes = hex::encode_upper(&padding_bytes[..remaining]),
+                            "Padding bytes were not nul bytes, maybe corrupt file?"
+                        )
+                    }
+                }
+            }
+            EntryType::Symlink => {
+                let mode = if header.mode()? & 0o100 > 0 {
+                    // Executable
+                    0o755
+                } else {
+                    // Not executable
+                    0o644
+                };
+                let mut target = container_path.to_path_buf();
+                target.push(
+                    header
+                        .link_name()?
+                        .unwrap()
+                        .iter()
+                        .skip(1)
+                        .collect::<PathBuf>(),
+                );
+                jre_layer
+                    .append_symlink(
+                        &layer::FileInfo {
+                            path: p,
+                            mode,
+                            uid: 0,
+                            gid: 0,
+                            last_modified: 0,
+                        },
+                        &target,
+                    )
+                    .await?;
+            }
+            _ => {
+                bail!("Unsupported entry type {:?}", entry_type)
+            }
+        }
+    }
+    // Write an extra symlink
     jre_layer
-        .append_file(
+        .append_symlink(
             &layer::FileInfo {
-                path: "test.tar".into(),
-                mode: 0x0755,
+                path: Path::new("/usr/bin/java").to_path_buf(),
+                mode: 0o755,
                 uid: 0,
                 gid: 0,
                 last_modified: 0,
             },
-            *length,
-            decoder,
+            Path::new("/usr/local/java/bin/java"),
         )
         .await?;
-    info!(
-        expected_length = length,
-        "JRE download complete, finalising layer"
-    );
     let l = jre_layer.finalise().await?;
     info!(
         path = l.blob_path.as_os_str().to_str().unwrap(),
         checksum = hex::encode(l.sha256_checksum),
-        "layer assembled"
+        "Created JRE Layer"
     );
 
     if args.skip_container {
-        warn!(
-            dir = &minecraft_dir.as_os_str().to_str().unwrap(),
-            "Skipping container creation"
-        );
+        warn!("Skipping container creation");
         process::exit(-1);
     }
     let java_config = JavaConfig {
         jars: vec![],
         main_class: "".to_string(),
     };
-
-    let layer_tmp_path = oci_blob_dir.join("tmp.tar.gz");
-    let mut layer_hasher = hash_writer::new(File::create(&layer_tmp_path)?, Sha256::new());
-    {
-        // Do the TAR creation in a block.
-        // This is because as long as this GzEncoder exists, it borrows the hasher. We need
-        // that borrow back to do the `.finalize_bytes()` later on.
-        let enc = GzEncoder::new(&mut layer_hasher, Compression::best());
-        let mut tar = Builder::new(enc);
-        // Security feature
-        tar.follow_symlinks(false);
-        info!("appending to TAR");
-        tar.append_dir_all("opt/minecraft", &minecraft_dir)?;
-    }
-    let layer_checksum = layer_hasher.finalize_bytes();
-    // Rename the layer `.tar.gz` file to its SHA256 hash checksum. This is how layers in a OCI
-    // image work.
-    let layer_hash_name = oci_blob_dir.join(hex::encode(layer_checksum));
-    fs::rename(layer_tmp_path, &layer_hash_name)?;
-    info!(
-        path = layer_hash_name.to_str(),
-        hash = hex::encode_upper(layer_checksum),
-        "Assembled minecraft layer"
-    );
-
+    /*
+        let layer_tmp_path = oci_blob_dir.join("tmp.tar.gz");
+        let mut layer_hasher = hash_writer::new(File::create(&layer_tmp_path)?, Sha256::new());
+        {
+            // Do the TAR creation in a block.
+            // This is because as long as this GzEncoder exists, it borrows the hasher. We need
+            // that borrow back to do the `.finalize_bytes()` later on.
+            let enc = GzEncoder::new(&mut layer_hasher, Compression::best());
+            let mut tar = Builder::new(enc);
+            // Security feature
+            tar.follow_symlinks(false);
+            info!("appending to TAR");
+            tar.append_dir_all("opt/minecraft", &minecraft_dir)?;
+        }
+        let layer_checksum = layer_hasher.finalize_bytes();
+        // Rename the layer `.tar.gz` file to its SHA256 hash checksum. This is how layers in a OCI
+        // image work.
+        let layer_hash_name = oci_blob_dir.join(hex::encode(layer_checksum));
+        fs::rename(layer_tmp_path, &layer_hash_name)?;
+        info!(
+            path = layer_hash_name.to_str(),
+            hash = hex::encode_upper(layer_checksum),
+            "Assembled minecraft layer"
+        );
+    */
     // Download the rest of the container image layers
 
     // Clone the os/arch and move them into the closure for lifetime reasons
@@ -372,7 +560,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Write a new config, although much of it will be copied over.
     let mut layer_diff_ids = config_base_file.rootfs.diff_ids.clone();
-    layer_diff_ids.push(format!("sha256:{}", hex::encode(layer_checksum)));
+    //layer_diff_ids.push(format!("sha256:{}", hex::encode(layer_checksum)));
     let config_file = oci_distribution::config::ConfigFile {
         created: Some(created_timestamp),
         architecture: config_base_file.architecture,
@@ -443,7 +631,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Download all the layers
     info!(
-        tmp_dir = format!("{:?}", dir),
+        //tmp_dir = format!("{:?}", dir),
         "Downloading container layers"
     );
     // TODO Multithread this, or something
@@ -482,7 +670,7 @@ async fn main() -> anyhow::Result<()> {
     // Add our new layer from earlier into the manifest
     manifest.layers.push(OciDescriptor {
         media_type: "application/vnd.oci.image.layer.v1.tar+gzip".to_string(),
-        digest: format!("sha256:{}", hex::encode(layer_checksum)),
+        //digest: format!("sha256:{}", hex::encode(layer_checksum)),
         size: i64::try_from(config_file_json_bytes.len())?,
         ..Default::default()
     });
@@ -537,7 +725,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let index_string = serde_json::to_string(&index)?;
     let index_bytes = index_string.as_bytes();
-    let index_file_path = oci_archive_dir.path().join("index.json");
+    let index_file_path = oci_archive_dir.join("index.json");
     let mut index_file = File::create(&index_file_path)?;
     index_file.write_all(index_bytes)?;
     info!(
@@ -547,7 +735,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let layout_bytes = "{\"imageLayoutVersion\": \"1.0.0\"}".as_bytes();
-    let layout_file_path = oci_archive_dir.path().join("oci-layout");
+    let layout_file_path = oci_archive_dir.join("oci-layout");
     let mut layout_file = File::create(&layout_file_path)?;
     layout_file.write_all(layout_bytes)?;
     info!(
@@ -557,6 +745,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Tar up the completed container image
+    /*
     if let Some(of) = &args.output_file {
         let output_tar_file = File::create(of)?;
         let mut tar = Builder::new(output_tar_file);
@@ -568,6 +757,7 @@ async fn main() -> anyhow::Result<()> {
         tar.append_dir_all("", &oci_archive_dir)?;
         info!("Outputted container TAR to STDOUT");
     }
+     */
 
     warn!(
         eula_url = "https://www.minecraft.net/en-us/eula".to_string(),

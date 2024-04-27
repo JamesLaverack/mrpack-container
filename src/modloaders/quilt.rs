@@ -1,12 +1,14 @@
-use crate::download;
 use crate::hash_writer;
+use crate::layer::TarLayerBuilder;
 use crate::modloaders;
+use crate::{download, layer};
 use digest::Digest;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use sha1::Sha1;
 use sha2::Sha256;
 use std::fs::File;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::*;
 
 use super::JavaConfig;
@@ -23,6 +25,7 @@ pub struct ServerLaunchProfile {
 #[serde(rename_all = "camelCase")]
 pub struct Library {
     pub name: String,
+    // TODO make this a url::Url
     pub url: String,
 }
 
@@ -56,8 +59,9 @@ pub fn split_artefact(artefact: &str) -> anyhow::Result<(Vec<&str>, &str, &str)>
     return Ok((group_id, artifact_id, version));
 }
 
-pub async fn download_quilt(
-    minecraft_dir: PathBuf,
+pub async fn build_quilt_layer(
+    oci_blob_dir: &Path,
+    minecraft_dir: &Path,
     minecraft_version: &str,
     loader_version: &str,
 ) -> anyhow::Result<super::JavaConfig> {
@@ -84,6 +88,12 @@ pub async fn download_quilt(
         .await?;
 
     let lib_dir = minecraft_dir.join("libraries");
+
+    info!(
+        blob_dir = oci_blob_dir.as_os_str().to_str().unwrap(),
+        "Creating Quilt layer"
+    );
+    let mut quilt_layer = TarLayerBuilder::new(&oci_blob_dir).await?;
 
     let mut jar_paths = Vec::new();
     for lib in server_profile.libraries {
@@ -113,23 +123,32 @@ pub async fn download_quilt(
         }
         jar_path.push(artifact_id);
         jar_path.push(version);
-        std::fs::create_dir_all(&jar_path)?;
         jar_path.push(&jar_name);
 
-        let request = reqwest::get(download_url.to_str().unwrap()).await?;
-        let mut hasher = hash_writer::new(File::create(&jar_path)?, Sha256::new());
-        let size = download::stream_to_writer(request.bytes_stream(), &mut hasher).await?;
-        let checksum = hasher.finalize_bytes();
+        let digest: [u8; 32] = quilt_layer
+            .append_file_from_url(
+                &layer::FileInfo {
+                    path: jar_path.clone(),
+                    mode: 0o644,
+                    uid: 0,
+                    gid: 0,
+                    last_modified: 0,
+                },
+                &url::Url::parse(&download_url.to_str().unwrap())?,
+                Sha256::new(),
+            )
+            .await?
+            .into();
+
         info!(
             name = artifact_id,
             group = group_id.join("."),
             version = version,
             url = lib.url,
-            sha256 = hex::encode_upper(checksum),
+            sha256 = hex::encode_upper(digest),
             jar_name = jar_name,
             jar_path = jar_path.as_os_str().to_str().unwrap(),
             download_url = download_url.as_os_str().to_str().unwrap(),
-            size_bytes = size,
             "Library downloaded"
         );
 
@@ -137,7 +156,16 @@ pub async fn download_quilt(
         jar_paths.push(jar_path.strip_prefix(&minecraft_dir)?.to_path_buf());
     }
 
-    Ok(JavaConfig{
+    let l = quilt_layer.finalise().await?;
+    info!(
+        quilt_loader_version = &loader_version,
+        minecraft_version = &minecraft_version,
+        layer_sha256 = hex::encode_upper(l.sha256_checksum),
+        layer_path = l.blob_path.as_os_str().to_str().unwrap(),
+        "Created Quilt layer"
+    );
+
+    Ok(JavaConfig {
         jars: jar_paths,
         main_class: "org.quiltmc.loader.impl.launch.server.QuiltServerLauncher".to_string(),
     })

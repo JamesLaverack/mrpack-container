@@ -1,10 +1,11 @@
 use digest::Digest;
 use pin_project_lite::pin_project;
 use sha2::Sha256;
+use sha1::Sha1;
 use std::io::{Error, Result, Write};
 use std::pin::{pin, Pin};
 use std::task::{Context, Poll};
-use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncWrite, AsyncRead, ReadBuf};
 
 pub struct HashWriter<W: Write, D: Digest> {
     write: W,
@@ -16,6 +17,61 @@ pin_project! {
         #[pin]
         inner: AW,
         digest: D,
+    }
+}
+
+pin_project! {
+    pub struct HashReaderAsync<AR, D> {
+        #[pin]
+        inner: AR,
+        digest: D,
+    }
+}
+impl<AR, D> AsyncRead for HashReaderAsync<AR, D>
+    where
+        AR: AsyncRead,
+        D: Digest,
+{
+    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<Result<()>> {
+        let start_len = buf.filled().len();
+        let projection = self.project();
+        let r = projection.inner.poll_read(cx, buf);
+        let bytes_read = buf.filled().len() - start_len;
+        if bytes_read > 0 {
+            projection.digest.update(&buf.filled()[start_len..]);
+        }
+        return r
+    }
+}
+impl<AR, D> HashReaderAsync<AR, D>
+    where
+        D: digest::Digest,
+{
+    pub fn new(digest: D, inner: AR) -> HashReaderAsync<AR, D> {
+        return HashReaderAsync { digest, inner };
+    }
+    pub fn into_inner(mut self) -> (AR, digest::Output<D>) {
+        return (self.inner, self.digest.finalize());
+    }
+}
+
+impl<AR> HashReaderAsync<AR, Sha256> {
+    pub fn new_sha256(inner: AR) -> HashReaderAsync<AR, Sha256> {
+        return Self::new(Sha256::new(), inner);
+    }
+
+    pub fn into_inner_sha256(mut self) -> (AR, [u8; 32]) {
+        return (self.inner, self.digest.finalize().into());
+    }
+}
+
+impl<AR> HashReaderAsync<AR, Sha1> {
+    pub fn new_sha1(inner: AR) -> HashReaderAsync<AR, Sha1> {
+        return Self::new(Sha1::new(), inner);
+    }
+
+    pub fn into_inner_sha1(mut self) -> (AR, [u8; 20]) {
+        return (self.inner, self.digest.finalize().into());
     }
 }
 

@@ -2,3 +2,5 @@ target/
 *.mrpack
 !/tests/mrpacks/*.mrpack
 *.tar
+output/
+
