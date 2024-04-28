@@ -195,7 +195,9 @@ async fn main() -> anyhow::Result<()> {
         "Retrieved Minecraft version information from Mojang"
     );
 
-    // Install JRE Dependencies
+    ////////////////////////////////
+    //// MUSL
+    ////////////////////////////////
     let musl_dep = deb::Package {
         name: "musl".to_string(),
         version: "1.2.5-1".to_string(),
@@ -388,129 +390,12 @@ async fn main() -> anyhow::Result<()> {
     info!(
         path = l.blob_path.as_os_str().to_str().unwrap(),
         checksum = hex::encode(l.sha256_checksum),
-        "Created JRE Layer"
+        "Created MUSL Layer"
     );
 
-    // Install the mod loader
-    // The way we need to configure the container later will depend on the mod loader. So we'll get
-    // a configuration function back
-    let java_config;
-    if let Some(_fabric_version) = &index.dependencies.fabric_loader {
-        anyhow::bail!("fabric not supported");
-    } else if let Some(quilt_version) = &index.dependencies.quilt_loader {
-        info!(quilt_version = &quilt_version, "Using Quilt modloader");
-        java_config = quilt::build_quilt_layer(
-            &oci_blob_dir,
-            Path::new("/opt/minecraft/"),
-            &index.dependencies.minecraft,
-            &quilt_version,
-        )
-        .await?;
-    } else if let Some(_forge_version) = &index.dependencies.forge {
-        anyhow::bail!("forge not supported");
-    } else if let Some(_neoforge_version) = &index.dependencies.neoforge {
-        anyhow::bail!("neoforge not supported");
-    } else {
-        anyhow::bail!("No supported modloader found");
-        // TODO support pure vanilla installs?
-    }
-
-    // Get the Vanilla Minecraft server jar
-    // Most installs will expect this to be downloaded as server.jar
-    /*
-    if false {
-        let minecraft_vanilla_jar = minecraft_dir.join("server.jar");
-        let java_version = mojang::download_server_jar(
-            minecraft_vanilla_jar.clone(),
-            &index.dependencies.minecraft,
-        )
-        .await?;
-
-        // Install the mod loader
-        // The way we need to configure the container later will depend on the mod loader. So we'll get
-        // a configuration function back
-        let java_config;
-        if let Some(_fabric_version) = &index.dependencies.fabric_loader {
-            anyhow::bail!("fabric not supported");
-        } else if let Some(quilt_version) = &index.dependencies.quilt_loader {
-            java_config = quilt::download_quilt(
-                minecraft_dir.into(),
-                &index.dependencies.minecraft,
-                &quilt_version,
-            )
-            .await?;
-        } else if let Some(_forge_version) = &index.dependencies.forge {
-            anyhow::bail!("forge not supported");
-        } else if let Some(_neoforge_version) = &index.dependencies.neoforge {
-            anyhow::bail!("neoforge not supported");
-        } else {
-            anyhow::bail!("No supported modloader found");
-            // TODO support pure vanilla installs?
-        }
-
-        // Install downloads, usually mods
-        if let Some(files) = index.files {
-            for mrfile in files {
-                if let Some(env) = mrfile.env {
-                    match env.server {
-                        EnvType::Required => {}
-                        EnvType::Optional => {
-                            info!(path = mrfile.path, "including optional server-side mod");
-                        }
-                        EnvType::Unsupported => {
-                            info!(path = mrfile.path, "skipping unsupported server-side mod");
-                            continue;
-                        }
-                    }
-                }
-                if mrfile.downloads.len() == 0 {
-                    bail!("File had no provided download URLs")
-                }
-                let u = mrfile.downloads.get(0).unwrap().as_str();
-                let request = reqwest::get(u).await?;
-                // TODO check for path injection here
-                let path = minecraft_dir.join(&mrfile.path);
-                fs::create_dir_all(&path.parent().unwrap())?;
-
-                let mut hasher = hash_writer::new(File::create(&path)?, Sha512::new());
-                let size = download::stream_to_writer(request.bytes_stream(), &mut hasher).await?;
-                let checksum = hasher.finalize_bytes();
-
-                if checksum != mrfile.hashes.sha512 {
-                    error!(
-                        expected_sha512 = hex::encode_upper(mrfile.hashes.sha512),
-                        actual_sha512 = hex::encode_upper(checksum),
-                        path = mrfile.path,
-                        url = u,
-                        "SHA512 checksum did not match!"
-                    );
-                    bail!("Checksum validation failure");
-                }
-                info!(
-                    size_bytes = size,
-                    //sha512 = format!("{:X}", &checksum),
-                    path = mrfile.path,
-                    url = u,
-                    "Downloaded file"
-                );
-            }
-        }
-        extract_overrides(&mut zipfile, &minecraft_dir, "overrides")?;
-        extract_overrides(&mut zipfile, &minecraft_dir, "server-overrides")?;
-
-        // Write as new layer
-        info!("Creating new layer tarball");
-        let oci_archive_dir = tempdir()?;
-        let oci_blob_dir = oci_archive_dir.join("blobs").join("sha256");
-        fs::create_dir_all(&oci_blob_dir)?;
-        info!(
-            path = oci_archive_dir.as_os_str().to_str().unwrap(),
-            "Assembling new container as oci-archive"
-        );
-    }
-
-     */
-    // Grab a JRE
+    ////////////////////////////////
+    //// JRE
+    ////////////////////////////////
     let jre_download = adoptium::get_jre_download(manifest.java_version, arch).await?;
     info!(
         url = jre_download.url.to_string(),
@@ -659,71 +544,36 @@ async fn main() -> anyhow::Result<()> {
         "Created JRE Layer"
     );
 
-    if args.skip_container {
-        warn!("Skipping container creation");
-        process::exit(-1);
-    }
-    let java_config = JavaConfig {
-        jars: vec![],
-        main_class: "".to_string(),
-    };
-    /*
-        let layer_tmp_path = oci_blob_dir.join("tmp.tar.gz");
-        let mut layer_hasher = hash_writer::new(File::create(&layer_tmp_path)?, Sha256::new());
-        {
-            // Do the TAR creation in a block.
-            // This is because as long as this GzEncoder exists, it borrows the hasher. We need
-            // that borrow back to do the `.finalize_bytes()` later on.
-            let enc = GzEncoder::new(&mut layer_hasher, Compression::best());
-            let mut tar = Builder::new(enc);
-            // Security feature
-            tar.follow_symlinks(false);
-            info!("appending to TAR");
-            tar.append_dir_all("opt/minecraft", &minecraft_dir)?;
-        }
-        let layer_checksum = layer_hasher.finalize_bytes();
-        // Rename the layer `.tar.gz` file to its SHA256 hash checksum. This is how layers in a OCI
-        // image work.
-        let layer_hash_name = oci_blob_dir.join(hex::encode(layer_checksum));
-        fs::rename(layer_tmp_path, &layer_hash_name)?;
-        info!(
-            path = layer_hash_name.to_str(),
-            hash = hex::encode_upper(layer_checksum),
-            "Assembled minecraft layer"
-        );
-    */
-    // Download the rest of the container image layers
-
-    // Clone the os/arch and move them into the closure for lifetime reasons
-    let osc = OS.clone();
-    let client_config = ClientConfig {
-        platform_resolver: Some(Box::new(move |manifests| {
-            manifests
-                .iter()
-                .find(|entry| {
-                    entry.platform.as_ref().map_or(false, |platform| {
-                        platform.os == osc && platform.architecture == arch.docker()
-                    })
-                })
-                .map(|e| e.digest.clone())
-        })),
-        ..Default::default()
-    };
-    let mut registry_client = Client::new(client_config);
-    // We grab a distroless base image. Just glibc, libssl, ca-certs, and a few basics.
-    let base_image_ref: Reference = "gcr.io/distroless/static:nonroot".parse()?;
-    info!(
-        base_image = base_image_ref.whole().as_str(),
-        "Determined base container image"
-    );
-
-    let (mut manifest, _config_hash, raw_base_config) = registry_client
-        .pull_manifest_and_config(&base_image_ref, &RegistryAuth::Anonymous)
+    ////////////////////////////////
+    //// MOD LOADER
+    ////////////////////////////////
+    // Install the mod loader
+    // The way we need to configure the container later will depend on the mod loader. So we'll get
+    // a configuration function back
+    let java_config;
+    if let Some(_fabric_version) = &index.dependencies.fabric_loader {
+        anyhow::bail!("fabric not supported");
+    } else if let Some(quilt_version) = &index.dependencies.quilt_loader {
+        info!(quilt_version = &quilt_version, "Using Quilt modloader");
+        java_config = quilt::build_quilt_layer(
+            &oci_blob_dir,
+            Path::new("/opt/minecraft/"),
+            &index.dependencies.minecraft,
+            &quilt_version,
+        )
         .await?;
+    } else if let Some(_forge_version) = &index.dependencies.forge {
+        anyhow::bail!("forge not supported");
+    } else if let Some(_neoforge_version) = &index.dependencies.neoforge {
+        anyhow::bail!("neoforge not supported");
+    } else {
+        anyhow::bail!("No supported modloader found");
+        // TODO support pure vanilla installs?
+    }
 
-    let config_base_file: ConfigFile = serde_json::from_str(&raw_base_config)?;
-    info!("Loaded base container config");
-
+    ////////////////////////////////
+    //// CONTAINER CONFIG
+    ////////////////////////////////
     // Write a new config, although much of it will be copied over.
     let mut layer_diff_ids = config_base_file.rootfs.diff_ids.clone();
     //layer_diff_ids.push(format!("sha256:{}", hex::encode(layer_checksum)));
