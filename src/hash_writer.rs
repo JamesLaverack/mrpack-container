@@ -7,6 +7,8 @@ use std::pin::{pin, Pin};
 use std::task::{Context, Poll};
 use tokio::io::{AsyncWrite, AsyncRead, ReadBuf};
 
+// TODO Replace with tokio_util::io::InspectWriter
+
 pub struct HashWriter<W: Write, D: Digest> {
     write: W,
     digest: D,

@@ -1,3 +1,4 @@
+use crate::arch::Architecture;
 use anyhow::anyhow;
 use std::path::PathBuf;
 #[allow(unused_imports)]
@@ -11,17 +12,16 @@ pub struct JREDownload {
     pub sha256: [u8; 32],
 }
 
-fn adoptium_arch(arch: &str) -> &str {
+fn adoptium_arch(arch: &Architecture) -> &str {
     match arch {
-        "amd64" => "x64",
-        "arm64" => "aarch64",
-        a => a,
+        Architecture::X86_64 => "x64",
+        Architecture::ARM64 => "aarch64",
     }
 }
 
 pub async fn get_jre_download(
     java_version: mojang::JavaVersion,
-    arch: &str,
+    arch: Architecture,
 ) -> anyhow::Result<JREDownload> {
     let mut api_url = PathBuf::new();
     api_url.push("v3/assets/latest/");
@@ -39,6 +39,7 @@ pub async fn get_jre_download(
         .append_pair("architecture", adoptium_arch(&arch))
         .append_pair("image_type", "jre");
     info!(
+        arch = ?&arch,
         url = path.to_string(),
         "Requesting JRE information from Eclipse Adoptium"
     );
@@ -60,4 +61,3 @@ pub async fn get_jre_download(
         sha256: checksum,
     });
 }
-
