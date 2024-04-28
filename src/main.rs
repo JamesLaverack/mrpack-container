@@ -10,7 +10,6 @@ use futures::io::ErrorKind;
 use futures::prelude::*;
 use oci_distribution::{config::ConfigFile, manifest::OciDescriptor};
 use oci_spec::image::MediaType;
-use sha1::Sha1;
 use sha2::{Digest, Sha512};
 use tar::EntryType;
 use thiserror::Error;
@@ -661,61 +660,23 @@ async fn main() -> anyhow::Result<()> {
     //// Minecraft Config
     ////////////////////////////////
     let mut minecraft_layer_builder = TarLayerBuilder::new(&oci_blob_dir).await?;
-    let eula_text = if args.accept_eula {
-        "eula=true"
-    } else {
-        "eula=false"
-    };
-    let mut eula_bytes = eula_text.as_bytes();
-    minecraft_layer_builder
-        .append_file(
-            &FileInfo {
-                path: Path::new("/var/minecraft/eula.txt").to_path_buf(),
-                mode: 0o644,
-                uid: 0,
-                gid: 0,
-                last_modified: 0,
-            },
-            eula_bytes.len() as u64,
-            &mut eula_bytes,
-        )
-        .await?;
-    match manifest.downloads.server {
-        None => anyhow::bail!("Server download unavailable"),
-        Some(server_download) => {
-            debug!(
-                url = &server_download.url.as_str(),
-                sha1 = hex::encode_upper(&server_download.sha1),
-                minecraft_version = &index.dependencies.minecraft,
-                "Downloading Minecraft server JAR..."
-            );
-            let digest: [u8; 20] = minecraft_layer_builder
-                .append_file_from_url(
-                    &layer::FileInfo {
-                        path: "/var/minecraft/server.jar".into(),
-                        mode: 0o644,
-                        uid: 0,
-                        gid: 0,
-                        last_modified: 0,
-                    },
-                    &server_download.url,
-                    Sha1::new(),
-                )
-                .await?
-                .into();
-            if digest != server_download.sha1 {
-                error!(
-                    expected_sha1 = hex::encode_upper(server_download.sha1),
-                    actual_sha1 = hex::encode_upper(digest),
-                    minecraft_version = &index.dependencies.minecraft,
-                    url = server_download.url.as_str(),
-                    "server.jar SHA1 checksum did not match!"
-                );
-                anyhow::bail!("Checksum validation failure");
-            }
-        }
+    if args.accept_eula {
+        let mut eula_bytes = "eula=true".as_bytes();
+        minecraft_layer_builder
+            .append_file(
+                &FileInfo {
+                    path: Path::new("/var/minecraft/eula.txt").to_path_buf(),
+                    mode: 0o644,
+                    uid: 0,
+                    gid: 0,
+                    last_modified: 0,
+                },
+                eula_bytes.len() as u64,
+                &mut eula_bytes,
+            )
+            .await?;
     }
-    // Finaly set permissions on some directories
+    // Set permissions on some directories
     minecraft_layer_builder
         .append_directory(&layer::FileInfo {
             path: Path::new("/var").to_path_buf(),
@@ -765,7 +726,6 @@ async fn main() -> anyhow::Result<()> {
     info!(
         path = ?&minecraft_layer.blob_path,
         digest = &minecraft_layer.digest(),
-        eula_file = eula_text,
         "Created Minecraft Layer"
     );
     layers.push(minecraft_layer);
@@ -827,7 +787,7 @@ async fn main() -> anyhow::Result<()> {
     ////////////////////////////////
     //// CONTAINER MANIFEST
     ////////////////////////////////
-    let manifest = oci_distribution::manifest::OciImageManifest {
+    let container_manifest = oci_distribution::manifest::OciImageManifest {
         media_type: Some(MediaType::ImageManifest.to_string()),
         config: OciDescriptor::from(&config_blob),
         layers: layers.iter().map(OciDescriptor::from).collect(),
@@ -835,7 +795,9 @@ async fn main() -> anyhow::Result<()> {
     };
     let mut manifest_blob_builder =
         JsonBlobBuilder::new(&oci_blob_dir, MediaType::ImageManifest).await?;
-    manifest_blob_builder.append_json(&manifest).await?;
+    manifest_blob_builder
+        .append_json(&container_manifest)
+        .await?;
     let manifest_blob = manifest_blob_builder.finalise().await?;
     // Write the manifest. In a docker image this is a file in the root named manifest.json
     // in an OCI image it's also a blob.
@@ -848,7 +810,7 @@ async fn main() -> anyhow::Result<()> {
     ////////////////////////////////
     //// TOP-LEVEL INDEX
     ////////////////////////////////
-    let index = oci_distribution::manifest::OciImageIndex {
+    let container_index = oci_distribution::manifest::OciImageIndex {
         schema_version: 2,
         media_type: Some(MediaType::ImageIndex.to_string()),
         manifests: vec![oci_distribution::manifest::ImageIndexEntry {
@@ -870,7 +832,7 @@ async fn main() -> anyhow::Result<()> {
             index.name,
         )])),
     };
-    let index_string = serde_json::to_string(&index)?;
+    let index_string = serde_json::to_string(&container_index)?;
     let index_bytes = index_string.as_bytes();
     let index_file_path = oci_archive_dir.join("index.json");
     let mut index_file = File::create(&index_file_path)?;
@@ -892,8 +854,12 @@ async fn main() -> anyhow::Result<()> {
     );
 
     warn!(
-        eula_url = "https://www.minecraft.net/en-us/eula".to_string(),
-        "🚨Do NOT distribute this image publicly.🚨 It contains Mojang property. See the Minecraft EULA.");
+        url = manifest.downloads.server.unwrap().url.to_string(),
+        minecraft_version = index.dependencies.minecraft,
+        expected_path_in_container = "/var/minecraft/server.jar",
+        "You still need a Mojang JAR file, you can find the link in this log message"
+    );
+
     info!("done!");
     Ok(())
 }

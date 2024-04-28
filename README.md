@@ -16,42 +16,56 @@ The resulting containers are:
 - Small, usually a few hundred MB depending on mods installed
 - Fast to start up, with no downloads on bootup required
 - Security focused, running as non-root with the majority of the filesystem immutable
-- Immutable, with all dependencies packaged they will not change over time  
+- Immutable, with (almost) all dependencies packaged they will not change over time  
+
+The only missing dependency is the Mojang server.jar itself, which is non-redistributable.
+You can either add another container layer ontop of one generated here, or you can download it and mount it in at runtime.
+Generally speaking, you should place it at `/var/minecraft/server.jar` inside the container.
 
 ## Warnings
-
-**This is pre-Alpha and is under construction.**
-In particular, the code quality is awful because this is thrown together.
-Many things are not yet supported. For example, only Quilt works at the moment.
 
 You are responsible for adhering to the licensing requirements of the mod files involved.
 This project is not affiliated with Modrinth.
 NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.
 
-## 🚨**DO NOT DISTRIBUTE CONTAINER IMAGES MADE WITH THIS TOOL**🚨
-
-Container images produced by this tool will contain Mojang property in the form of a minecraft `server.jar`.
-The Minecraft EULA prohibits redistribution of their game code, including a `server.jar`.
-**Only** use this tool locally, and load the resulting image directly into your container runtime or host in a **private** container registry.
+**This is pre-Alpha and is under construction.**
+In particular, the code quality is awful because this is thrown together.
+Many things are not yet supported. For example, only Quilt works at the moment.
 
 ## Building Images
 
 You need a Modrinth format modpack file (i.e., a `.mrpack` file).
 You can find these on [Modrinth](https://modrinth.com/modpacks), or use [packwiz](https://packwiz.infra.link/) to convert other formats of modpack to the Modrinth format.
 
-```
-mkdir ./output
+```bash
 mrpack-container my-modpack.mrpack ./output --accept-eula
 ```
 
 You can load and execute the produced image directly:
-```
+```bash
 tar cf - -C ./output/ . | podman load
-podman run -p 25565:25565 <container_hash>
 ```
 
-To **actually use** the container you'll probably want to mount in a directory over `/var/minecraft/world`. 
-Plus a settings file as `/var/minecraft/server.properties`.
+## Using Images
+
+You will need to mount:
+- A Minecraft server var, usually at `/var/minecraft/sever.jar`
+- If the eula wasn't accepted at build time, then you'll need to do it now by mounting in a text file containing `eula=true` to `/var/minecraft/eula.txt`.
+
+And you will probably **want** to mount:
+- A settings file, usually at `/var/minecraft/server.properties`
+- A directory to store the world saves, usually at `/var/minecraft/world`
+
+For example:
+```bash
+wget https://piston-data.mojang.com/v1/objects/84194a2f286ef7c14ed7ce0090dba59902951553/server.jar
+mkdir world
+podman run \
+  -p 25565:25565 \
+  -v "$(pwd)"/world:/var/minecraft/world \
+  -v "$(pwd)"/server.jar:/var/minecraft/server.jar:ro \
+  <container_id>
+```
 
 ## Container Structure
 
