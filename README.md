@@ -1,54 +1,85 @@
 # mrpack-container
 
-A command line application that turns a Modrinth `.mrpack` file into a container OCI image.
-This container is for use on a container runtime such as Podman or Docker, or on an orchestrator such as Kubernetes.
+A command line application that turns a Modrinth `.mrpack` file into ready-to-use container images.
 
-This does not require any container runtime to run, and can be run inside of a container itself.
-No mod files or other scripts are executed as part of this operation.
+`mrpack-container` is:
+- Fast
+- Lightweight
+- Has minimal dependencies
+- Pure Rust
+- Does not require a JVM
+- Does not require a container runtime
+- Deterministic, produces the same output each time (-ish) 
+- Direct streaming: no temporary files or scratch space required
 
-You are responsible for adhering to the licensing requriements of the mod files invovled.
+The resulting containers are:
+- Small, usually a few hundred MB depending on mods installed
+- Fast to start up, with no downloads on bootup required
+- Security focused, running as non-root with the majority of the filesystem immutable
+- Immutable, with all dependencies packaged they will not change over time  
+
+## Warnings
+
+**This is pre-Alpha and is under construction.**
+In particular, the code quality is awful because this is thrown together.
+Many things are not yet supported. For example, only Quilt works at the moment.
+
+You are responsible for adhering to the licensing requirements of the mod files involved.
 This project is not affiliated with Modrinth.
+NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.
+
+## 🚨**DO NOT DISTRIBUTE CONTAINER IMAGES MADE WITH THIS TOOL**🚨
+
+Container images produced by this tool will contain Mojang property in the form of a minecraft `server.jar`.
+The Minecraft EULA prohibits redistribution of their game code, including a `server.jar`.
+**Only** use this tool locally, and load the resulting image directly into your container runtime or host in a **private** container registry.
 
 ## Building Images
 
 You need a Modrinth format modpack file (i.e., a `.mrpack` file).
 You can find these on [Modrinth](https://modrinth.com/modpacks), or use [packwiz](https://packwiz.infra.link/) to convert other formats of modpack to the Modrinth format.
 
-the `--output-tar` flag is required to specify the output location for a container in TAR format.
-
 ```
-mrpack-container my-modpack.mrpack --output-tar image.tar
+mkdir ./output
+mrpack-container my-modpack.mrpack ./output --accept-eula
 ```
 
 You can load and execute the produced image directly:
 ```
-docker load --input image.tar
-docker run my-modpack:0.1.0
+tar cf - -C ./output/ . | podman load
+podman run -p 25565:25565 <container_hash>
 ```
 
-See below for how to use the image to run a server.
-
-## Overriding Settings
-
-### Overriding the Base Image
-
-By default mrpack-container uses [wolfi](wolfi.dev) 's JRE image to provide the base system and Java.
-The Mojang version API is used to retreve the correct Java version, and that JVM is used.
-You can instead specify your own base image with `--base-image`.
-Doing so will disable any Java version checking and just use the image you provide.
+To **actually use** the container you'll probably want to mount in a directory over `/var/minecraft/world`. 
+Plus a settings file as `/var/minecraft/server.properties`.
 
 ## Container Structure
 
-The container places all files resolved from the Modpack in a single container layer.
-The minecraft directory is `/opt/minecraft`.
-This means that mods are located in `/opt/minecraft/mods`, configuration files in `/opt/minecraft/config`, and so on.
+- `/bin` with a simlink for `/bin/java` (to `/usr/local/java/bin/java`)
+- `/lib` with the musl libc library
+- `/usr/local/java` with the JVM
+- `/usr/local/minecraft/lib` with modloader libraries
+- `/usr/share/doc/musl` with copyright information for MUSL
+- `/var/minecraft/eula.txt` with the result of passing `--accept-eula` or not
+- `/var/minecraft/server.jar` with the Mojang Minecraft server JAR
 
-Unlike the normal mod loader installers, mrpack-container does not repackage downloaded JARs into a single JAR.
+The files and overrides in the Modrinth file are unpacked into `/var/minecraft`.
+Permissions are set as `0755` or `0644`, and most files are owned by root.
+The container is intended to be run with the main process running as uid `1000` and gid `1000`, therefore a number of directories are owned by that user instead:
+- `/var/minecraft`
+- `/var/minecraft/config`
+- `/var/miencraft/libraries`
 
-## Using the Container
+This is an intentional security choice, in order to make an attacker with remote code execution on your Minecraft server have as hard of a job as possible mantaining persistence.
 
-You will likely want to bind some extra things into the container at runtime to actually use it.
-The EULA is not accepted by default, so you will want to bind your own `eula.txt` into `/opt/minecraft/eula.txt` at runtime.
-You may also want to provide settings, as no `server.settings` file is provided.
-Minecraft will start without one, and use defaults, but this will result in a server without any allow listing or ops.
-You likely want to bind in `/opt/minecraft/whitelist.json` and `/opt/minecraft/ops.json`.
+## Layers
+
+The container makes extensive use of layering:
+
+- A base layer, of musl from Debian. Including only the shared library and copyright information.
+- a JRE
+- Your mod loader of choice
+- Each download from the mrpack file, one layer per download 
+- overrides
+- server overrides
+- Minecraft `server.jar`, `eula.txt`, and permissions changes

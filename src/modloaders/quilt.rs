@@ -147,8 +147,7 @@ pub async fn build_quilt_layer(
             "Library downloaded"
         );
 
-        // We only want to store the *relative* path.
-        jar_paths.push(jar_path.strip_prefix(&minecraft_dir)?.to_path_buf());
+        jar_paths.push(jar_path.to_path_buf());
     }
     let l = quilt_layer.finalise().await?;
     info!(

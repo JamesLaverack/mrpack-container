@@ -549,23 +549,25 @@ async fn main() -> anyhow::Result<()> {
     let java_config;
     let modloader_layer;
     if let Some(_fabric_version) = &index.dependencies.fabric_loader {
-        anyhow::bail!("fabric not supported");
+        // TODO Support Fabric
+        anyhow::bail!("fabric not yet supported");
     } else if let Some(quilt_version) = &index.dependencies.quilt_loader {
         info!(quilt_version = &quilt_version, "Using Quilt modloader");
         (java_config, modloader_layer) = quilt::build_quilt_layer(
             &oci_blob_dir,
-            Path::new("/opt/minecraft/"),
+            Path::new("/usr/local/minecraft/lib/"),
             &index.dependencies.minecraft,
             &quilt_version,
         )
         .await?;
     } else if let Some(_forge_version) = &index.dependencies.forge {
-        anyhow::bail!("forge not supported");
+        // TODO Support Forge
+        anyhow::bail!("forge not yet supported");
     } else if let Some(_neoforge_version) = &index.dependencies.neoforge {
-        anyhow::bail!("neoforge not supported");
+        // TODO Support Neoforge
+        anyhow::bail!("neoforge not yet supported");
     } else {
-        anyhow::bail!("No supported modloader found");
-        // TODO support pure vanilla installs?
+        anyhow::bail!("No modloader found");
     }
     layers.push(modloader_layer);
 
@@ -658,33 +660,6 @@ async fn main() -> anyhow::Result<()> {
     //// Minecraft Config
     ////////////////////////////////
     let mut minecraft_layer_builder = TarLayerBuilder::new(&oci_blob_dir).await?;
-    minecraft_layer_builder
-        .append_directory(&layer::FileInfo {
-            path: Path::new("/var").to_path_buf(),
-            mode: 0o755,
-            uid: 0,
-            gid: 0,
-            last_modified: 0,
-        })
-        .await?;
-    minecraft_layer_builder
-        .append_directory(&layer::FileInfo {
-            path: Path::new("/var/minecraft").to_path_buf(),
-            mode: 0o755,
-            uid: 1000,
-            gid: 1000,
-            last_modified: 0,
-        })
-        .await?;
-    minecraft_layer_builder
-        .append_directory(&layer::FileInfo {
-            path: Path::new("/var/minecraft/mods").to_path_buf(),
-            mode: 0o755,
-            uid: 0,
-            gid: 0,
-            last_modified: 0,
-        })
-        .await?;
     let eula_text = if args.accept_eula {
         "eula=true"
     } else {
@@ -739,6 +714,52 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+    // Finaly set permissions on some directories
+    minecraft_layer_builder
+        .append_directory(&layer::FileInfo {
+            path: Path::new("/var").to_path_buf(),
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+            last_modified: 0,
+        })
+        .await?;
+    minecraft_layer_builder
+        .append_directory(&layer::FileInfo {
+            path: Path::new("/var/minecraft").to_path_buf(),
+            mode: 0o755,
+            uid: 1000,
+            gid: 1000,
+            last_modified: 0,
+        })
+        .await?;
+    minecraft_layer_builder
+        .append_directory(&layer::FileInfo {
+            path: Path::new("/var/minecraft/mods").to_path_buf(),
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+            last_modified: 0,
+        })
+        .await?;
+    minecraft_layer_builder
+        .append_directory(&layer::FileInfo {
+            path: Path::new("/var/minecraft/config").to_path_buf(),
+            mode: 0o755,
+            uid: 1000,
+            gid: 1000,
+            last_modified: 0,
+        })
+        .await?;
+    minecraft_layer_builder
+        .append_directory(&layer::FileInfo {
+            path: Path::new("/var/minecraft/libraries").to_path_buf(),
+            mode: 0o755,
+            uid: 1000,
+            gid: 1000,
+            last_modified: 0,
+        })
+        .await?;
     let minecraft_layer = minecraft_layer_builder.finalise().await?;
     info!(
         path = ?&minecraft_layer.blob_path,
@@ -770,7 +791,6 @@ async fn main() -> anyhow::Result<()> {
                             .jars
                             .into_iter()
                             .map(|p| p.as_os_str().to_str().unwrap().to_string())
-                            .map(|p| format!("/opt/minecraft/{}", p))
                             .collect::<Vec<String>>()
                             .join(":")),
                     java_config.main_class,
