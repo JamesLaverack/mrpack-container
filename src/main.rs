@@ -19,7 +19,7 @@ use packfile::EnvType;
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha512};
 use std::io;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::time::UNIX_EPOCH;
@@ -37,7 +37,7 @@ mod download;
 mod hash_writer;
 mod modloaders;
 use crate::arch::Architecture;
-use crate::layer::{FileInfo, JsonBlobBuilder, TarLayerBuilder};
+use crate::layer::{Blob, FileInfo, JsonBlobBuilder, TarLayerBuilder};
 use crate::modloaders::JavaConfig;
 #[allow(unused_imports)]
 use modloaders::{fabric, forge, quilt};
@@ -85,39 +85,59 @@ pub enum RegistryError {
     ParseError(serde_json::Error),
 }
 
-fn extract_overrides<R: std::io::Read + std::io::Seek>(
+async fn extract_overrides_to_layer<R: std::io::Read + std::io::Seek>(
     zipfile: &mut zip::ZipArchive<R>,
-    minecraft_dir: &std::path::Path,
+    oci_blob_dir: &Path,
+    container_dir: &Path,
     overrides: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Blob> {
+    let mut olayer_builder = TarLayerBuilder::new(oci_blob_dir).await?;
     for i in 0..zipfile.len() {
         let mut file = zipfile.by_index(i)?;
-        if let Some(path) = file.enclosed_name() {
-            if path.starts_with(overrides) {
-                let stripped_path = path.strip_prefix(overrides)?;
-                if file.is_file() {
-                    let new_filepath = minecraft_dir.join(stripped_path);
-                    if let Some(dirpath) = new_filepath.parent() {
-                        fs::create_dir_all(&dirpath)?;
-                    }
-                    let mut new_file = File::create(&new_filepath)?;
-                    info!(
-                        filename = path.to_str().unwrap(),
-                        overrides = overrides,
-                        "Unpacked overrides file"
-                    );
-                    io::copy(&mut file, &mut new_file)?;
-                }
+        if let Some(path) = file.enclosed_name().map(|e| e.to_path_buf()) {
+            if path.starts_with(overrides) && file.is_file() {
+                // This code is actually awful. We're reading the entire override file into
+                // memory. Then streaming it all out. Fine for a few KB of config file. Not fine if
+                // someone has a few hundred MB of JAR file in here.
+                let mut bytes = Vec::with_capacity(file.size() as usize);
+                std::io::copy(&mut file, &mut bytes)?;
+                let new_filepath = container_dir.join(path.strip_prefix(overrides)?);
+                olayer_builder
+                    .append_file(
+                        &layer::FileInfo {
+                            path: new_filepath.clone(),
+                            mode: 0o0644,
+                            uid: 0,
+                            gid: 0,
+                            last_modified: 0,
+                        },
+                        file.size(),
+                        &mut bytes.as_slice(),
+                    )
+                    .await?;
+                info!(
+                    path = ?new_filepath,
+                    overrides = overrides,
+                    "Unpacked overrides file"
+                );
             }
         }
     }
-    Ok(())
+    let layer = olayer_builder.finalise().await?;
+    info!(
+        path = ?&layer.blob_path,
+        digest = &layer.digest(),
+        overrides = overrides,
+        "Created Overrides Layer"
+    );
+    Ok(layer)
 }
 
 const OS: &str = "linux";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // TODO break this function out so it's not hundreds of lines long
     let args = Args::parse();
     let subscriber = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -143,10 +163,7 @@ async fn main() -> anyhow::Result<()> {
     if !path.exists() {
         anyhow::bail!("File not found");
     }
-    // TODO Support reading from HTTPS
-    // TODO Support reading from S3
-    // TODO Support reading from Modrinth with modrinth:// or something?
-    // TODO Support streaming this, instead of requiring the whole file in one?
+    // TODO use Async reading on this file, instead of sync code
     let mut zipfile = zip::ZipArchive::new(File::open(path)?)?;
     let index_file = match zipfile.by_name("modrinth.index.json") {
         Ok(file) => file,
@@ -572,6 +589,91 @@ async fn main() -> anyhow::Result<()> {
     layers.push(modloader_layer);
 
     ////////////////////////////////
+    //// DOWNLAODS
+    ////////////////////////////////
+    let minecraft_runtime_dir: PathBuf = "/var/minecraft".into();
+    if let Some(files) = index.files {
+        for mrfile in files {
+            if let Some(env) = mrfile.env {
+                match env.server {
+                    EnvType::Required => {}
+                    EnvType::Optional => {
+                        info!(path = mrfile.path, "including optional server-side mod");
+                    }
+                    EnvType::Unsupported => {
+                        info!(path = mrfile.path, "skipping unsupported server-side mod");
+                        continue;
+                    }
+                }
+            }
+            if mrfile.downloads.len() == 0 {
+                bail!("File had no provided download URLs")
+            }
+            let mut container_path = minecraft_runtime_dir.clone();
+            container_path.push(mrfile.path);
+
+            let u = mrfile.downloads.get(0).unwrap();
+            let mut file_layer_builder = TarLayerBuilder::new(&oci_blob_dir).await?;
+            let digest: [u8; 64] = file_layer_builder
+                .append_file_from_url(
+                    &layer::FileInfo {
+                        path: container_path.clone(),
+                        mode: 0o644,
+                        uid: 0,
+                        gid: 0,
+                        last_modified: 0,
+                    },
+                    &u,
+                    Sha512::new(),
+                )
+                .await?
+                .into();
+            if digest != mrfile.hashes.sha512 {
+                error!(
+                    expected_sha512 = hex::encode_upper(mrfile.hashes.sha512),
+                    actual_sha512 = hex::encode_upper(digest),
+                    container_path = ?&container_path,
+                    url = &u.to_string(),
+                    "SHA512 checksum did not match!"
+                );
+                bail!("Checksum validation failure");
+            }
+            let file_layer = file_layer_builder.finalise().await?;
+            info!(
+                path = ?&file_layer.blob_path,
+                digest = &file_layer.digest(),
+                sha512 = hex::encode_upper(digest),
+                container_path = ?&container_path,
+                url = &u.to_string(),
+                "Downloaded file into layer"
+            );
+            layers.push(file_layer);
+        }
+    }
+
+    ////////////////////////////////
+    //// OVERRIDES
+    ////////////////////////////////
+    layers.push(
+        extract_overrides_to_layer(
+            &mut zipfile,
+            &oci_blob_dir,
+            &Path::new("/var/minecraft"),
+            "overrides",
+        )
+        .await?,
+    );
+    layers.push(
+        extract_overrides_to_layer(
+            &mut zipfile,
+            &oci_blob_dir,
+            &Path::new("/var/minecraft"),
+            "server-overrides",
+        )
+        .await?,
+    );
+
+    ////////////////////////////////
     //// Minecraft Config
     ////////////////////////////////
     let mut minecraft_layer_builder = TarLayerBuilder::new(&oci_blob_dir).await?;
@@ -593,6 +695,15 @@ async fn main() -> anyhow::Result<()> {
             last_modified: 0,
         })
         .await?;
+    minecraft_layer_builder
+        .append_directory(&layer::FileInfo {
+            path: Path::new("/var/minecraft/mods").to_path_buf(),
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+            last_modified: 0,
+        })
+        .await?;
     let eula_text = if args.accept_eula {
         "eula=true"
     } else {
@@ -604,8 +715,8 @@ async fn main() -> anyhow::Result<()> {
             &FileInfo {
                 path: Path::new("/var/minecraft/eula.txt").to_path_buf(),
                 mode: 0o644,
-                uid: 1000,
-                gid: 1000,
+                uid: 0,
+                gid: 0,
                 last_modified: 0,
             },
             eula_bytes.len() as u64,
