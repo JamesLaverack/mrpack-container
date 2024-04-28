@@ -1,6 +1,6 @@
 # mrpack-container
 
-A command line application that turns a Modrinth `.mrpack` file into ready-to-use container images.
+A command line application that turns a Modrinth `.mrpack` file into a ready-to-use container image.
 
 `mrpack-container` is:
 - Fast
