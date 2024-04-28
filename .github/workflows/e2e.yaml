@@ -29,15 +29,13 @@ jobs:
           path: /usr/local/bin
           merge-multiple: true
       - run: |
-          container_id=$(mrpack-conatiner "tests/mrpacks/${{ matrix.mrpackfile }}" --stdout | podman load)
-          podman tag $container_id localhost/minecraft
+          mrpack-conatiner "tests/mrpacks/${{ matrix.mrpackfile }}" ./output 
+          container_id=$(tar cf - -C ./output . | podman load)
+          podman tag "${container_id}" localhost/minecraft
       - run: |
-          echo "eula=true" > /tmp/eula.txt
           podman run \
-            --mount type=bind,source=/tmp/eula.txt,target=/opt/minecraft/eula.txt \
+            -p 25565:25565
             localhost/minecraft:latest
       - run: python3 -m pip install mcstatus
-      - run: 60
+      - run: sleep 60
       - run: mcstatus localhost status
-
-

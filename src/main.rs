@@ -195,6 +195,7 @@ async fn main() -> anyhow::Result<()> {
     ////////////////////////////////
     //// MUSL
     ////////////////////////////////
+    // TODO verify the checksum of this DEB file
     let musl_dep = deb::Package {
         name: "musl".to_string(),
         version: "1.2.5-1".to_string(),
@@ -889,21 +890,6 @@ async fn main() -> anyhow::Result<()> {
         len_bytes = layout_bytes.len(),
         "Wrote OCI layout file"
     );
-
-    // Tar up the completed container image
-    /*
-    if let Some(of) = &args.output_file {
-        let output_tar_file = File::create(of)?;
-        let mut tar = Builder::new(output_tar_file);
-        tar.append_dir_all("", &oci_archive_dir)?;
-        info!(output_file = of, "Outputted saved container TAR");
-    }
-    if args.stdout {
-        let mut tar = Builder::new(io::stdout());
-        tar.append_dir_all("", &oci_archive_dir)?;
-        info!("Outputted container TAR to STDOUT");
-    }
-     */
 
     warn!(
         eula_url = "https://www.minecraft.net/en-us/eula".to_string(),
