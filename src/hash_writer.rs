@@ -1,9 +1,8 @@
 use digest::Digest;
 use pin_project_lite::pin_project;
-use sha1::Sha1;
 use sha2::Sha256;
 use std::io::{Error, Result, Write};
-use std::pin::{pin, Pin};
+use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
@@ -57,28 +56,8 @@ where
     pub fn new(digest: D, inner: AR) -> HashReaderAsync<AR, D> {
         return HashReaderAsync { digest, inner };
     }
-    pub fn into_inner(mut self) -> (AR, digest::Output<D>) {
+    pub fn into_inner(self) -> (AR, digest::Output<D>) {
         return (self.inner, self.digest.finalize());
-    }
-}
-
-impl<AR> HashReaderAsync<AR, Sha256> {
-    pub fn new_sha256(inner: AR) -> HashReaderAsync<AR, Sha256> {
-        return Self::new(Sha256::new(), inner);
-    }
-
-    pub fn into_inner_sha256(mut self) -> (AR, [u8; 32]) {
-        return (self.inner, self.digest.finalize().into());
-    }
-}
-
-impl<AR> HashReaderAsync<AR, Sha1> {
-    pub fn new_sha1(inner: AR) -> HashReaderAsync<AR, Sha1> {
-        return Self::new(Sha1::new(), inner);
-    }
-
-    pub fn into_inner_sha1(mut self) -> (AR, [u8; 20]) {
-        return (self.inner, self.digest.finalize().into());
     }
 }
 
@@ -121,9 +100,14 @@ where
     D: digest::Digest,
 {
     pub fn new(digest: D, inner: AW) -> HashWriterAsync<AW, D> {
-        return HashWriterAsync { digest, inner, total_bytes_written: 0 };
+        return HashWriterAsync {
+            digest,
+            inner,
+            total_bytes_written: 0,
+        };
     }
-    pub fn into_inner(mut self) -> (AW, digest::Output<D>, usize) {
+    #[allow(dead_code)]
+    pub fn into_inner(self) -> (AW, digest::Output<D>, usize) {
         return (self.inner, self.digest.finalize(), self.total_bytes_written);
     }
 }
@@ -133,8 +117,12 @@ impl<AW> HashWriterAsync<AW, Sha256> {
         return Self::new(Sha256::new(), inner);
     }
 
-    pub fn into_inner_sha256(mut self) -> (AW, [u8; 32], usize) {
-        return (self.inner, self.digest.finalize().into(), self.total_bytes_written);
+    pub fn into_inner_sha256(self) -> (AW, [u8; 32], usize) {
+        return (
+            self.inner,
+            self.digest.finalize().into(),
+            self.total_bytes_written,
+        );
     }
 }
 
@@ -167,18 +155,6 @@ impl<W: Write, D: Digest> HashWriter<W, D> {
 
 impl<W: Write> HashWriter<W, sha1::Sha1> {
     pub fn finalize_bytes(self) -> [u8; 20] {
-        Into::into(self.finalize())
-    }
-}
-
-impl<W: Write> HashWriter<W, sha2::Sha256> {
-    pub fn finalize_bytes(self) -> [u8; 32] {
-        Into::into(self.finalize())
-    }
-}
-
-impl<W: Write> HashWriter<W, sha2::Sha512> {
-    pub fn finalize_bytes(self) -> [u8; 64] {
         Into::into(self.finalize())
     }
 }

@@ -6,8 +6,6 @@ use bytes::BytesMut;
 use digest::Digest;
 use serde::{Deserialize, Serialize};
 use sha1::Sha1;
-use std::fs::File;
-use std::path::PathBuf;
 use tracing::*;
 use url::Url;
 
@@ -56,6 +54,7 @@ pub struct Download {
 }
 
 pub async fn download_manifest(minecraft_version: &str) -> anyhow::Result<VersionManifest> {
+    // TODO rewrite to be propertly async
     Ok(
         match reqwest::get("https://launchermeta.mojang.com/mc/game/version_manifest_v2.json")
             .await?

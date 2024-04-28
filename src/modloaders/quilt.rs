@@ -1,13 +1,8 @@
-use crate::hash_writer;
 use crate::layer::{Blob, TarLayerBuilder};
-use crate::modloaders;
-use crate::{download, layer};
 use digest::Digest;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use sha1::Sha1;
 use sha2::Sha256;
-use std::fs::File;
 use std::path::{Path, PathBuf};
 use tracing::*;
 
@@ -127,7 +122,7 @@ pub async fn build_quilt_layer(
 
         let digest: [u8; 32] = quilt_layer
             .append_file_from_url(
-                &layer::FileInfo {
+                &crate::layer::FileInfo {
                     path: jar_path.clone(),
                     mode: 0o644,
                     uid: 0,

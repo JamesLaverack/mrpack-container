@@ -1,51 +1,37 @@
-use anyhow::{bail, Context};
-use async_compression::tokio::bufread::XzDecoder;
-use async_compression::tokio::bufread::{GzipDecoder, LzmaDecoder, ZlibDecoder, ZstdDecoder};
-use async_compression::tokio::write::GzipEncoder;
-use chrono::prelude::Utc;
-use clap::Parser;
-use flate2::write::GzEncoder;
-use flate2::Compression;
-use futures::io::ErrorKind;
-use futures::prelude::*;
-use futures_util::StreamExt;
-use oci_distribution::config::Os;
-use oci_distribution::{
-    client::ClientConfig, config::ConfigFile, manifest::OciDescriptor, secrets::RegistryAuth,
-    Client, Reference,
-};
-use oci_spec::image::MediaType;
-use packfile::EnvType;
-use sha1::Sha1;
-use sha2::{Digest, Sha256, Sha512};
-use std::io;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process;
-use std::time::UNIX_EPOCH;
 use std::{collections::HashMap, fs};
 use std::{collections::HashSet, fs::File};
-use tar::{Builder, EntryType};
-use tempfile::tempdir;
+
+use anyhow::{bail, Context};
+use async_compression::tokio::bufread::{GzipDecoder, XzDecoder};
+use clap::Parser;
+use futures::io::ErrorKind;
+use futures::prelude::*;
+use oci_distribution::{config::ConfigFile, manifest::OciDescriptor};
+use oci_spec::image::MediaType;
+use sha1::Sha1;
+use sha2::{Digest, Sha512};
+use tar::EntryType;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, BufReader};
 #[allow(unused_imports)]
 use tracing::{debug, error, info, trace, warn};
 use tracing_subscriber;
 
-mod download;
-mod hash_writer;
-mod modloaders;
+use modloaders::quilt;
+use packfile::EnvType;
+
 use crate::arch::Architecture;
 use crate::layer::{Blob, FileInfo, JsonBlobBuilder, TarLayerBuilder};
-use crate::modloaders::JavaConfig;
-#[allow(unused_imports)]
-use modloaders::{fabric, forge, quilt};
 
 mod adoptium;
 mod arch;
 mod deb;
+mod download;
+mod hash_writer;
 mod layer;
+mod modloaders;
 mod mojang;
 mod packfile;
 
@@ -132,9 +118,6 @@ async fn extract_overrides_to_layer<R: std::io::Read + std::io::Seek>(
     );
     Ok(layer)
 }
-
-const OS: &str = "linux";
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // TODO break this function out so it's not hundreds of lines long
@@ -226,11 +209,10 @@ async fn main() -> anyhow::Result<()> {
         "Installing musl"
     );
     let musl_deb_request = reqwest::get(musl_dep.url()?).await?;
-    let musl_deb_length = &musl_deb_request.content_length().unwrap();
     let mut musl_tar_stream = tokio_util::io::StreamReader::new(
         musl_deb_request
             .bytes_stream()
-            .map_err(|e| io::Error::new(ErrorKind::Other, e)),
+            .map_err(|e| std::io::Error::new(ErrorKind::Other, e)),
     );
     let mut musl_layer_builder = TarLayerBuilder::new(&oci_blob_dir).await?;
     musl_layer_builder
@@ -256,7 +238,7 @@ async fn main() -> anyhow::Result<()> {
         .read_exact(&mut control_file_size_bytes)
         .await
         .context("Reading control file size")?;
-    let mut control_file_size_string = std::str::from_utf8(&control_file_size_bytes)
+    let control_file_size_string = std::str::from_utf8(&control_file_size_bytes)
         .context("Parse control file size as string")?;
     debug!(s = control_file_size_string, "string");
     let control_file_size = control_file_size_string
@@ -313,7 +295,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::io::copy(&mut (&mut musl_tar_stream).take(2), &mut tokio::io::sink()).await?;
     debug!("Opening xz data stream");
     // data.tar.xz data stream
-    let mut compressed_musl_data_stream = &mut (&mut musl_tar_stream).take(data_file_size);
+    let compressed_musl_data_stream = &mut (&mut musl_tar_stream).take(data_file_size);
     let mut buffered_compressed_musl_data_stream = BufReader::new(compressed_musl_data_stream);
     let mut musl_data_stream = XzDecoder::new(&mut buffered_compressed_musl_data_stream);
     loop {
@@ -390,7 +372,6 @@ async fn main() -> anyhow::Result<()> {
             }
         } else {
             debug!("Skipping data.tar.xz entry {:?}", path);
-            let mut block_bytes: [u8; 512] = [0; 512];
             let expected_blocks = (size / 512) + (if size % 512 == 0 { 0 } else { 1 });
             for _ in 0..expected_blocks {
                 (&mut musl_data_stream)
@@ -423,7 +404,7 @@ async fn main() -> anyhow::Result<()> {
     let mut jre_tar_stream = GzipDecoder::new(tokio_util::io::StreamReader::new(
         request
             .bytes_stream()
-            .map_err(|e| io::Error::new(ErrorKind::Other, e)),
+            .map_err(|e| std::io::Error::new(ErrorKind::Other, e)),
     ));
     let container_path = Path::new("/usr/local/java");
     let mut jre_layer_builder = TarLayerBuilder::new(&oci_blob_dir).await?;

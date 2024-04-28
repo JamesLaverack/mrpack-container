@@ -1,9 +1,10 @@
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
-use std::{error::Error, io::Write, marker::{Send, Sync, Unpin}};
-use std::path::Path;
-use digest::Digest;
-use crate::layer::TarLayerBuilder;
+use std::{
+    error::Error,
+    io::Write,
+    marker::{Send, Sync, Unpin},
+};
 
 /// Stream content from a bytes stream to a writer until the stream is complete
 pub async fn stream_to_writer<

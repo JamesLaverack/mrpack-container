@@ -1,11 +1,11 @@
-use crate::arch::Architecture;
-use anyhow::anyhow;
 use std::path::PathBuf;
+
+use anyhow::anyhow;
 #[allow(unused_imports)]
 use tracing::{debug, error, info, warn};
 use url::Url;
 
-use crate::mojang;
+use crate::arch::Architecture;
 
 pub struct JREDownload {
     pub url: url::Url,
