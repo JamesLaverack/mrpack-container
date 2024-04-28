@@ -13,9 +13,16 @@ impl Architecture {
         }
     }
 
+    pub fn oci(&self) -> oci_distribution::config::Architecture {
+        match self {
+            Architecture::X86_64 => oci_distribution::config::Architecture::Amd64,
+            Architecture::ARM64 => oci_distribution::config::Architecture::Arm64,
+        }
+    }
+
     pub fn linux(&self) -> &str {
         match self {
-            Architecture::X86_64 => "x64_64",
+            Architecture::X86_64 => "x86_64",
             Architecture::ARM64 => "aarch64",
         }
     }

@@ -20,12 +20,12 @@ fn adoptium_arch(arch: &Architecture) -> &str {
 }
 
 pub async fn get_jre_download(
-    java_version: mojang::JavaVersion,
+    java_version: &str,
     arch: Architecture,
 ) -> anyhow::Result<JREDownload> {
     let mut api_url = PathBuf::new();
     api_url.push("v3/assets/latest/");
-    api_url.push(java_version.major_version.to_string());
+    api_url.push(java_version);
     api_url.push("hotspot");
     let base = Url::parse("https://api.adoptium.net/")?;
     let mut path = base.join(

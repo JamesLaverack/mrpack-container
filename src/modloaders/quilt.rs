@@ -1,5 +1,5 @@
 use crate::hash_writer;
-use crate::layer::TarLayerBuilder;
+use crate::layer::{Blob, TarLayerBuilder};
 use crate::modloaders;
 use crate::{download, layer};
 use digest::Digest;
@@ -64,7 +64,7 @@ pub async fn build_quilt_layer(
     minecraft_dir: &Path,
     minecraft_version: &str,
     loader_version: &str,
-) -> anyhow::Result<super::JavaConfig> {
+) -> anyhow::Result<(JavaConfig, Blob)> {
     // We intentionally don't use the Quilt installer. This saves us from either having to bundle
     // Java and run it now, or include it to be run when the container starts, which would take a
     // while.
@@ -155,18 +155,21 @@ pub async fn build_quilt_layer(
         // We only want to store the *relative* path.
         jar_paths.push(jar_path.strip_prefix(&minecraft_dir)?.to_path_buf());
     }
-
     let l = quilt_layer.finalise().await?;
     info!(
         quilt_loader_version = &loader_version,
         minecraft_version = &minecraft_version,
         layer_sha256 = hex::encode_upper(l.sha256_checksum),
-        layer_path = l.blob_path.as_os_str().to_str().unwrap(),
+        digest = l.digest(),
+        layer_path = ?l.blob_path,
         "Created Quilt layer"
     );
 
-    Ok(JavaConfig {
-        jars: jar_paths,
-        main_class: "org.quiltmc.loader.impl.launch.server.QuiltServerLauncher".to_string(),
-    })
+    Ok((
+        JavaConfig {
+            jars: jar_paths,
+            main_class: "org.quiltmc.loader.impl.launch.server.QuiltServerLauncher".to_string(),
+        },
+        l,
+    ))
 }

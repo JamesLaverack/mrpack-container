@@ -9,10 +9,12 @@ use flate2::Compression;
 use futures::io::ErrorKind;
 use futures::prelude::*;
 use futures_util::StreamExt;
+use oci_distribution::config::Os;
 use oci_distribution::{
     client::ClientConfig, config::ConfigFile, manifest::OciDescriptor, secrets::RegistryAuth,
     Client, Reference,
 };
+use oci_spec::image::MediaType;
 use packfile::EnvType;
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha512};
@@ -35,7 +37,7 @@ mod download;
 mod hash_writer;
 mod modloaders;
 use crate::arch::Architecture;
-use crate::layer::{FileInfo, TarLayerBuilder};
+use crate::layer::{FileInfo, JsonBlobBuilder, TarLayerBuilder};
 use crate::modloaders::JavaConfig;
 #[allow(unused_imports)]
 use modloaders::{fabric, forge, quilt};
@@ -64,15 +66,6 @@ struct Args {
 
     #[arg(long, help = "Write a EULA acceptance file into the container")]
     accept_eula: bool,
-
-    #[arg(
-        long,
-        help = "Include the Minecraft server JAR. It's important to remember that with this included the Minecraft EULA forbids you from distributing the resulting contianer."
-    )]
-    include_mojang_property: bool,
-
-    #[arg(long, help = "Skip creating the container, for debug purposes only")]
-    skip_container: bool,
 
     #[arg(long, help = "Debug logging output")]
     debug: bool,
@@ -145,8 +138,6 @@ async fn main() -> anyhow::Result<()> {
         arch = ?arch,
         "Running mrpack-container");
 
-    let created_timestamp = Utc::now();
-
     // Load the pack file and extract it
     let path = Path::new(&args.mr_pack_file);
     if !path.exists() {
@@ -195,6 +186,12 @@ async fn main() -> anyhow::Result<()> {
         "Retrieved Minecraft version information from Mojang"
     );
 
+    let java_version = args
+        .java_version
+        .unwrap_or(format!("{}", &manifest.java_version.major_version));
+
+    let mut layers: Vec<layer::Blob> = vec![];
+
     ////////////////////////////////
     //// MUSL
     ////////////////////////////////
@@ -218,8 +215,8 @@ async fn main() -> anyhow::Result<()> {
             .bytes_stream()
             .map_err(|e| io::Error::new(ErrorKind::Other, e)),
     );
-    let mut musl_layer = TarLayerBuilder::new(&oci_blob_dir).await?;
-    musl_layer
+    let mut musl_layer_builder = TarLayerBuilder::new(&oci_blob_dir).await?;
+    musl_layer_builder
         .append_directory(&layer::FileInfo {
             path: "/lib".into(),
             mode: 0o755,
@@ -327,11 +324,11 @@ async fn main() -> anyhow::Result<()> {
                 debug!(
                             path = ?path,
                             "Found shared library");
-                musl_layer
+                musl_layer_builder
                     .append_file(
                         &layer::FileInfo {
                             path: format!("/lib/ld-musl-{}.so.1", arch.linux()).into(),
-                            mode: 0o0644,
+                            mode: 0o0755,
                             uid: 0,
                             gid: 0,
                             last_modified: 0,
@@ -346,7 +343,7 @@ async fn main() -> anyhow::Result<()> {
                             "Found documentation");
                 let mut container_path = Path::new("/").to_path_buf();
                 container_path.push(path.to_path_buf().to_path_buf());
-                musl_layer
+                musl_layer_builder
                     .append_file(
                         &layer::FileInfo {
                             path: container_path,
@@ -386,17 +383,18 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let l = musl_layer.finalise().await?;
+    let musl_layer = musl_layer_builder.finalise().await?;
     info!(
-        path = l.blob_path.as_os_str().to_str().unwrap(),
-        checksum = hex::encode(l.sha256_checksum),
+        path = ?musl_layer.blob_path,
+        digest = musl_layer.digest(),
         "Created MUSL Layer"
     );
+    layers.push(musl_layer);
 
     ////////////////////////////////
     //// JRE
     ////////////////////////////////
-    let jre_download = adoptium::get_jre_download(manifest.java_version, arch).await?;
+    let jre_download = adoptium::get_jre_download(&java_version, arch).await?;
     info!(
         url = jre_download.url.to_string(),
         sha256 = hex::encode_upper(jre_download.sha256),
@@ -405,14 +403,13 @@ async fn main() -> anyhow::Result<()> {
 
     // Download and stream into a layer
     let request = reqwest::get(jre_download.url).await?;
-    let length = &request.content_length().unwrap();
     let mut jre_tar_stream = GzipDecoder::new(tokio_util::io::StreamReader::new(
         request
             .bytes_stream()
             .map_err(|e| io::Error::new(ErrorKind::Other, e)),
     ));
     let container_path = Path::new("/usr/local/java");
-    let mut jre_layer = TarLayerBuilder::new(&oci_blob_dir).await?;
+    let mut jre_layer_builder = TarLayerBuilder::new(&oci_blob_dir).await?;
     loop {
         trace!("Reading from TAR stream");
         // Read a TAR header
@@ -435,7 +432,7 @@ async fn main() -> anyhow::Result<()> {
         p.push(path.iter().skip(1).collect::<PathBuf>());
         match entry_type {
             EntryType::Directory => {
-                jre_layer
+                jre_layer_builder
                     .append_directory(&layer::FileInfo {
                         path: p,
                         mode: 0o755,
@@ -460,7 +457,7 @@ async fn main() -> anyhow::Result<()> {
                     // Not executable
                     0o0644
                 };
-                jre_layer
+                jre_layer_builder
                     .append_file(
                         &layer::FileInfo {
                             path: p,
@@ -506,7 +503,7 @@ async fn main() -> anyhow::Result<()> {
                         .skip(1)
                         .collect::<PathBuf>(),
                 );
-                jre_layer
+                jre_layer_builder
                     .append_symlink(
                         &layer::FileInfo {
                             path: p,
@@ -525,10 +522,10 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     // Write an extra symlink
-    jre_layer
+    jre_layer_builder
         .append_symlink(
             &layer::FileInfo {
-                path: Path::new("/usr/bin/java").to_path_buf(),
+                path: Path::new("/bin/java").to_path_buf(),
                 mode: 0o755,
                 uid: 0,
                 gid: 0,
@@ -537,12 +534,13 @@ async fn main() -> anyhow::Result<()> {
             Path::new("/usr/local/java/bin/java"),
         )
         .await?;
-    let l = jre_layer.finalise().await?;
+    let jre_layer = jre_layer_builder.finalise().await?;
     info!(
-        path = l.blob_path.as_os_str().to_str().unwrap(),
-        checksum = hex::encode(l.sha256_checksum),
+        path = ?jre_layer.blob_path,
+        digest = jre_layer.digest(),
         "Created JRE Layer"
     );
+    layers.push(jre_layer);
 
     ////////////////////////////////
     //// MOD LOADER
@@ -551,11 +549,12 @@ async fn main() -> anyhow::Result<()> {
     // The way we need to configure the container later will depend on the mod loader. So we'll get
     // a configuration function back
     let java_config;
+    let modloader_layer;
     if let Some(_fabric_version) = &index.dependencies.fabric_loader {
         anyhow::bail!("fabric not supported");
     } else if let Some(quilt_version) = &index.dependencies.quilt_loader {
         info!(quilt_version = &quilt_version, "Using Quilt modloader");
-        java_config = quilt::build_quilt_layer(
+        (java_config, modloader_layer) = quilt::build_quilt_layer(
             &oci_blob_dir,
             Path::new("/opt/minecraft/"),
             &index.dependencies.minecraft,
@@ -570,160 +569,182 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("No supported modloader found");
         // TODO support pure vanilla installs?
     }
+    layers.push(modloader_layer);
+
+    ////////////////////////////////
+    //// Minecraft Config
+    ////////////////////////////////
+    let mut minecraft_layer_builder = TarLayerBuilder::new(&oci_blob_dir).await?;
+    minecraft_layer_builder
+        .append_directory(&layer::FileInfo {
+            path: Path::new("/var").to_path_buf(),
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+            last_modified: 0,
+        })
+        .await?;
+    minecraft_layer_builder
+        .append_directory(&layer::FileInfo {
+            path: Path::new("/var/minecraft").to_path_buf(),
+            mode: 0o755,
+            uid: 1000,
+            gid: 1000,
+            last_modified: 0,
+        })
+        .await?;
+    let eula_text = if args.accept_eula {
+        "eula=true"
+    } else {
+        "eula=false"
+    };
+    let mut eula_bytes = eula_text.as_bytes();
+    minecraft_layer_builder
+        .append_file(
+            &FileInfo {
+                path: Path::new("/var/minecraft/eula.txt").to_path_buf(),
+                mode: 0o644,
+                uid: 1000,
+                gid: 1000,
+                last_modified: 0,
+            },
+            eula_bytes.len() as u64,
+            &mut eula_bytes,
+        )
+        .await?;
+    match manifest.downloads.server {
+        None => anyhow::bail!("Server download unavailable"),
+        Some(server_download) => {
+            debug!(
+                url = &server_download.url.as_str(),
+                sha1 = hex::encode_upper(&server_download.sha1),
+                minecraft_version = &index.dependencies.minecraft,
+                "Downloading Minecraft server JAR..."
+            );
+            let digest: [u8; 20] = minecraft_layer_builder
+                .append_file_from_url(
+                    &layer::FileInfo {
+                        path: "/var/minecraft/server.jar".into(),
+                        mode: 0o644,
+                        uid: 0,
+                        gid: 0,
+                        last_modified: 0,
+                    },
+                    &server_download.url,
+                    Sha1::new(),
+                )
+                .await?
+                .into();
+            if digest != server_download.sha1 {
+                error!(
+                    expected_sha1 = hex::encode_upper(server_download.sha1),
+                    actual_sha1 = hex::encode_upper(digest),
+                    minecraft_version = &index.dependencies.minecraft,
+                    url = server_download.url.as_str(),
+                    "server.jar SHA1 checksum did not match!"
+                );
+                anyhow::bail!("Checksum validation failure");
+            }
+        }
+    }
+    let minecraft_layer = minecraft_layer_builder.finalise().await?;
+    info!(
+        path = ?&minecraft_layer.blob_path,
+        digest = &minecraft_layer.digest(),
+        eula_file = eula_text,
+        "Created Minecraft Layer"
+    );
+    layers.push(minecraft_layer);
 
     ////////////////////////////////
     //// CONTAINER CONFIG
     ////////////////////////////////
-    // Write a new config, although much of it will be copied over.
-    let mut layer_diff_ids = config_base_file.rootfs.diff_ids.clone();
-    //layer_diff_ids.push(format!("sha256:{}", hex::encode(layer_checksum)));
-    let config_file = oci_distribution::config::ConfigFile {
-        created: Some(created_timestamp),
-        architecture: config_base_file.architecture,
-        os: config_base_file.os,
+    let config_file = ConfigFile {
+        architecture: arch.oci(),
+        os: oci_distribution::config::Os::Linux,
         config: Some(oci_distribution::config::Config {
             // TODO force non-root
-            user: config_base_file.config.clone().and_then(|c| c.user),
+            user: Some("1000:1000".to_string()),
             // The default Minecraft server port
             exposed_ports: Some(HashSet::from(["25565/tcp".to_string()])),
-            // TODO fix this clone() mess
-            env: config_base_file.config.clone().unwrap_or_default().env,
+            entrypoint: Some(vec!["/bin/java".to_string()]),
             cmd: Some(
                 [
-                    "java".to_string(),
                     // We don't create a custom JAR with everything bundled in, so instead set the classpath to
                     // the individual JAR libraries, and set the main class this way.
-                    "--class-path".to_string(),
-                    java_config
-                        .jars
-                        .into_iter()
-                        .map(|p| p.as_os_str().to_str().unwrap().to_string())
-                        .map(|p| format!("/opt/minecraft/{}", p))
-                        .collect::<Vec<String>>()
-                        .join(":"),
+                    "--class-path".to_string()
+                        + "="
+                        + &*(java_config
+                            .jars
+                            .into_iter()
+                            .map(|p| p.as_os_str().to_str().unwrap().to_string())
+                            .map(|p| format!("/opt/minecraft/{}", p))
+                            .collect::<Vec<String>>()
+                            .join(":")),
                     java_config.main_class,
                 ]
                 .to_vec(),
             ),
-            entrypoint: config_base_file.config.unwrap_or_default().entrypoint,
-            working_dir: Some("/opt/minecraft".to_string()),
+            working_dir: Some("/var/minecraft".to_string()),
             ..Default::default()
         }),
-        // We don't include the history of the base container
         history: Some(vec![oci_distribution::config::History {
-            created: Some(created_timestamp),
+            // No timestamp, for stability
             author: Some("mrpack-container".to_string()),
             ..Default::default()
         }]),
         rootfs: oci_distribution::config::Rootfs {
             r#type: "layers".to_string(),
-            diff_ids: layer_diff_ids,
+            diff_ids: layers.iter().rev().map(layer::Blob::digest).collect(),
         },
         ..Default::default()
     };
+
     // Write out the config JSON file.
-    let config_tmp_path = oci_blob_dir.join("config.json");
-    let config_tmp_file = File::create(&config_tmp_path)?;
-    let mut config_hasher = hash_writer::new(&config_tmp_file, Sha256::new());
-    let config_file_json = serde_json::to_string(&config_file)?;
-    let config_file_json_bytes = config_file_json.as_bytes();
-    config_hasher.write_all(config_file_json_bytes)?;
-    config_tmp_file.sync_all()?;
-    let config_checksum = config_hasher.finalize_bytes();
-    // Rename the `config.json` file to its SHA256 hash checksum.
-    let config_hash_name = oci_blob_dir.join(hex::encode(config_checksum));
-    fs::rename(config_tmp_path, &config_hash_name)?;
+    let mut config_blob_builder =
+        JsonBlobBuilder::new(&oci_blob_dir, MediaType::ImageConfig).await?;
+    config_blob_builder.append_json(&config_file).await?;
+    let config_blob = config_blob_builder.finalise().await?;
     info!(
-        path = config_hash_name.to_str(),
-        hash = hex::encode_upper(config_checksum),
+        path = ?config_blob.blob_path,
+        digest = config_blob.digest(),
         "Wrote Container Config file"
     );
-    manifest.config = OciDescriptor {
-        media_type: "application/vnd.oci.image.config.v1+json".to_string(),
-        digest: format!("sha256:{}", hex::encode(config_checksum)),
-        size: i64::try_from(config_file_json_bytes.len())?,
+
+    ////////////////////////////////
+    //// CONTAINER MANIFEST
+    ////////////////////////////////
+    let manifest = oci_distribution::manifest::OciImageManifest {
+        media_type: Some(MediaType::ImageManifest.to_string()),
+        config: OciDescriptor::from(&config_blob),
+        layers: layers.iter().map(OciDescriptor::from).collect(),
         ..Default::default()
     };
-
-    // Download all the layers
-    info!(
-        //tmp_dir = format!("{:?}", dir),
-        "Downloading container layers"
-    );
-    // TODO Multithread this, or something
-    for layer in &manifest.layers {
-        let stream = registry_client
-            .pull_blob_stream(&base_image_ref, &layer.digest)
-            .await?;
-        // TODO don't assume everything is SHA256
-        let splits = layer.digest.split(':').collect::<Vec<&str>>();
-        let digest = splits.get(1).expect("Layer had no digest hash");
-        let layer_path = oci_blob_dir.join(digest);
-        let mut hasher = hash_writer::new(File::create(&layer_path)?, Sha256::new());
-        download::stream_to_writer(stream, &mut hasher).await?;
-        let checksum = hasher.finalize_bytes();
-        if hex::encode(checksum) != *digest {
-            panic!("Checksum mismatch!")
-        }
-        info!(
-            digest = layer.digest,
-            path = layer_path.as_os_str().to_str().unwrap(),
-            checksum = hex::encode_upper(checksum),
-            size_bytes = layer.size,
-            "Downloaded layer"
-        );
-    }
-    manifest.layers = manifest
-        .layers
-        .into_iter()
-        .map(|mut layer| {
-            // TODO don't assume all layers are gziped
-            layer.media_type = "application/vnd.oci.image.layer.v1.tar+gzip".to_string();
-            layer
-        })
-        .collect();
-
-    // Add our new layer from earlier into the manifest
-    manifest.layers.push(OciDescriptor {
-        media_type: "application/vnd.oci.image.layer.v1.tar+gzip".to_string(),
-        //digest: format!("sha256:{}", hex::encode(layer_checksum)),
-        size: i64::try_from(config_file_json_bytes.len())?,
-        ..Default::default()
-    });
-    // Set the OCI media type
-    manifest.media_type = Some("application/vnd.oci.image.manifest.v1+json".to_string());
-
+    let mut manifest_blob_builder =
+        JsonBlobBuilder::new(&oci_blob_dir, MediaType::ImageManifest).await?;
+    manifest_blob_builder.append_json(&manifest).await?;
+    let manifest_blob = manifest_blob_builder.finalise().await?;
     // Write the manifest. In a docker image this is a file in the root named manifest.json
     // in an OCI image it's also a blob.
-    let manifest_tmp_file_path = oci_blob_dir.join("manifest.json");
-    let manifest_tmp_file = File::create(&manifest_tmp_file_path)?;
-    let mut manifest_hasher = hash_writer::new(&manifest_tmp_file, Sha256::new());
-    let manifest_string = serde_json::to_string(&manifest)?;
-    let manifest_bytes = manifest_string.as_bytes();
-    manifest_hasher.write_all(manifest_bytes)?;
-    let manifest_checksum = manifest_hasher.finalize_bytes();
-    let manifest_hash_name = oci_blob_dir.join(hex::encode(manifest_checksum));
-    fs::rename(&manifest_tmp_file_path, &manifest_hash_name)?;
     info!(
-        path = manifest_tmp_file_path.as_os_str().to_str().unwrap(),
-        len_bytes = manifest_bytes.len(),
-        hash = hex::encode_upper(manifest_checksum),
-        os = OS,
-        arch = args.arch,
-        "Wrote image manifest"
+        path = ?manifest_blob.blob_path,
+        digest = manifest_blob.digest(),
+        "Wrote Container Image Manifest file"
     );
 
-    // In an OCI iamge we also require a top-level index.json and oci-layout file.
+    ////////////////////////////////
+    //// TOP-LEVEL INDEX
+    ////////////////////////////////
     let index = oci_distribution::manifest::OciImageIndex {
         schema_version: 2,
-        media_type: Some("application/vnd.oci.image.index.v1+json".to_string()),
+        media_type: Some(MediaType::ImageIndex.to_string()),
         manifests: vec![oci_distribution::manifest::ImageIndexEntry {
-            media_type: manifest.media_type.unwrap(),
-            size: manifest_bytes.len() as i64,
-            digest: format!("sha256:{}", hex::encode(manifest_checksum)),
+            media_type: manifest_blob.media_type.to_string(),
+            size: manifest_blob.size as i64,
+            digest: manifest_blob.digest(),
             platform: Some(oci_distribution::manifest::Platform {
-                architecture: args.arch,
-                os: OS.to_string(),
+                architecture: arch.docker().to_string(),
+                os: "linux".to_string(),
                 os_version: None,
                 os_features: None,
                 variant: None,
@@ -731,13 +752,10 @@ async fn main() -> anyhow::Result<()> {
             }),
             annotations: None,
         }],
-        annotations: Some(HashMap::from([
-            ("org.opencontainers.image.ref.name".to_string(), index.name),
-            (
-                "org.opencontainers.image.base.name".to_string(),
-                base_image_ref.to_string(),
-            ),
-        ])),
+        annotations: Some(HashMap::from([(
+            "org.opencontainers.image.ref.name".to_string(),
+            index.name,
+        )])),
     };
     let index_string = serde_json::to_string(&index)?;
     let index_bytes = index_string.as_bytes();
@@ -777,7 +795,7 @@ async fn main() -> anyhow::Result<()> {
 
     warn!(
         eula_url = "https://www.minecraft.net/en-us/eula".to_string(),
-        "🚨Do NOT distribute this image publicly.🚨 It conatains Mojang property. See the Minecraft EULA.");
+        "🚨Do NOT distribute this image publicly.🚨 It contains Mojang property. See the Minecraft EULA.");
     info!("done!");
     Ok(())
 }

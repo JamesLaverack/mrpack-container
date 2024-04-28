@@ -1,12 +1,15 @@
 use crate::hash_writer;
 use crate::hash_writer::HashWriterAsync;
-use crate::layer::LayerBuilderError::InvalidPath;
+use crate::layer::LayerBuilderError::{InvalidPath, JsonError, NotAJsonMediaType};
 use anyhow::Context;
 use async_compression::tokio::write::GzipEncoder;
 use chrono::DateTime;
 use digest::Digest;
 use futures_util::TryStreamExt;
+use oci_distribution::manifest::OciDescriptor;
+use oci_spec::image::MediaType;
 use rand::distributions::{Alphanumeric, DistString};
+use serde::Serialize;
 use sha2::Sha256;
 use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
@@ -23,10 +26,7 @@ use url::Url;
 #[derive(thiserror::Error, Debug)]
 pub enum LayerBuilderError {
     #[error("Failed to create temporary tar file '{path}' for writing")]
-    TmpFileCreation {
-        path: PathBuf,
-        source: io::Error,
-    },
+    TmpFileCreation { path: PathBuf, source: io::Error },
     #[error("Downloaded file '{path}' was an unexpected size. Expected {expected} bytes but was {actual} bytes.")]
     InvalidSize {
         expected: u64,
@@ -34,23 +34,13 @@ pub enum LayerBuilderError {
         path: PathBuf,
     },
     #[error("File cannot be empty")]
-    EmptyFile {
-        path: PathBuf,
-    },
+    EmptyFile { path: PathBuf },
     #[error("Path '{path}' for tar entry was invalid")]
-    InvalidPath {
-        path: PathBuf,
-        source: io::Error,
-    },
+    InvalidPath { path: PathBuf, source: io::Error },
     #[error("Path '{path}' was not an absolute path")]
-    RelativePath {
-        path: PathBuf,
-    },
+    RelativePath { path: PathBuf },
     #[error("Failed to write to tar file '{path}'")]
-    TmpFileWrite {
-        path: PathBuf,
-        source: io::Error,
-    },
+    TmpFileWrite { path: PathBuf, source: io::Error },
     #[error("Failed to rename tar file from temporary name '{from_path}' to final blob name '{to_path}'")]
     TmpFileRename {
         from_path: PathBuf,
@@ -62,6 +52,10 @@ pub enum LayerBuilderError {
         url: url::Url,
         source: reqwest::Error,
     },
+    #[error("Failed to render Json")]
+    JsonError { source: serde_json::Error },
+    #[error("The media type {media_type} is not a JSON media type")]
+    NotAJsonMediaType { media_type: MediaType },
 }
 
 #[derive(Default)]
@@ -109,6 +103,92 @@ impl Into<FileInfo> for FileInfoBuilder {
     }
 }
 
+pub struct JsonBlobBuilder {
+    blob_dir: PathBuf,
+    tmp_tarfile_path: PathBuf,
+    writer: HashWriterAsync<File, Sha256>,
+    media_type: MediaType,
+}
+
+impl JsonBlobBuilder {
+    pub async fn new(
+        blob_dir: &Path,
+        media_type: MediaType,
+    ) -> Result<JsonBlobBuilder, LayerBuilderError> {
+        if !format!("{}", media_type).ends_with("+json") {
+            return Err(NotAJsonMediaType { media_type });
+        }
+        let mut filename = ".tmp-".to_owned();
+        filename.push_str(&*Alphanumeric.sample_string(&mut rand::thread_rng(), 16));
+        filename.push_str(".json");
+        let mut tmp_tarfile_path = blob_dir.clone().to_path_buf();
+        tmp_tarfile_path.push(filename);
+        let mut gz_writer =
+            HashWriterAsync::new_sha256(File::create(&tmp_tarfile_path).await.map_err(|s| {
+                LayerBuilderError::TmpFileCreation {
+                    path: tmp_tarfile_path.clone(),
+                    source: s,
+                }
+            })?);
+
+        return Ok(crate::layer::JsonBlobBuilder {
+            blob_dir: blob_dir.clone().to_path_buf(),
+            tmp_tarfile_path,
+            writer: gz_writer,
+            media_type,
+        });
+    }
+
+    pub fn tmp_filepath(&self) -> &Path {
+        self.tmp_tarfile_path.as_path()
+    }
+
+    pub async fn append_json<S: Serialize>(&mut self, data: &S) -> Result<(), LayerBuilderError> {
+        let string = serde_json::to_string(data).map_err(|source| JsonError { source })?;
+        let bytes = string.as_bytes();
+        self.writer
+            .write(&bytes)
+            .await
+            .map_err(|s| LayerBuilderError::TmpFileWrite {
+                path: self.tmp_tarfile_path.clone(),
+                source: s,
+            })?;
+        debug!(num_bytes = bytes.len(), "Wrote JSON to layer");
+        Ok(())
+    }
+
+    pub async fn finalise(mut self) -> Result<Blob, LayerBuilderError> {
+        self.writer
+            .shutdown()
+            .await
+            .map_err(|s| LayerBuilderError::TmpFileWrite {
+                path: self.tmp_tarfile_path.clone(),
+                source: s,
+            })?;
+        let (_, sha256, total_bytes): (File, [u8; 32], usize) = self.writer.into_inner_sha256();
+        // Rename it to the checksum
+        let mut tarfile_path = self.blob_dir.clone();
+        tarfile_path.push(hex::encode(sha256));
+        tokio::fs::rename(&self.tmp_tarfile_path, &tarfile_path)
+            .await
+            .map_err(|s| LayerBuilderError::TmpFileRename {
+                from_path: self.tmp_tarfile_path.clone(),
+                to_path: tarfile_path.clone(),
+                source: s,
+            })?;
+        debug!(
+            blob_path = tarfile_path.as_os_str().to_str().unwrap(),
+            sha256_checksum = hex::encode_upper(sha256),
+            "Finished layer"
+        );
+        Ok(Blob {
+            blob_path: tarfile_path,
+            sha256_checksum: sha256,
+            size: total_bytes as u64,
+            media_type: self.media_type,
+        })
+    }
+}
 pub struct TarLayerBuilder {
     blob_dir: PathBuf,
     tmp_tarfile_path: PathBuf,
@@ -347,7 +427,7 @@ impl TarLayerBuilder {
         Ok(())
     }
 
-    pub async fn finalise(mut self) -> Result<Layer, LayerBuilderError> {
+    pub async fn finalise(mut self) -> Result<Blob, LayerBuilderError> {
         // Finalising header
         self.writer
             .write_all(&[0; 1024])
@@ -363,7 +443,8 @@ impl TarLayerBuilder {
                 path: self.tmp_tarfile_path.clone(),
                 source: s,
             })?;
-        let (_, sha256): (File, [u8; 32]) = self.writer.into_inner().into_inner_sha256();
+        let (_, sha256, total_bytes): (File, [u8; 32], usize) =
+            self.writer.into_inner().into_inner_sha256();
         // Rename it to the checksum
         let mut tarfile_path = self.blob_dir.clone();
         tarfile_path.push(hex::encode(sha256));
@@ -379,14 +460,35 @@ impl TarLayerBuilder {
             sha256_checksum = hex::encode_upper(sha256),
             "Finished layer"
         );
-        Ok(Layer {
+        Ok(Blob {
             blob_path: tarfile_path,
             sha256_checksum: sha256,
+            media_type: MediaType::ImageLayerGzip,
+            size: total_bytes as u64,
         })
     }
 }
 
-pub struct Layer {
+pub struct Blob {
     pub blob_path: PathBuf,
     pub sha256_checksum: [u8; 32],
+    pub media_type: MediaType,
+    pub size: u64,
+}
+
+impl Blob {
+    pub fn digest(&self) -> String {
+        format!("sha256:{}", hex::encode(self.sha256_checksum))
+    }
+}
+
+impl From<&Blob> for OciDescriptor {
+    fn from(layer: &Blob) -> OciDescriptor {
+        OciDescriptor {
+            digest: layer.digest(),
+            media_type: layer.media_type.to_string(),
+            size: layer.size as i64,
+            ..Default::default()
+        }
+    }
 }
