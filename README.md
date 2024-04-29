@@ -52,7 +52,7 @@ You need a Modrinth format modpack file (i.e., a `.mrpack` file).
 You can find these on [Modrinth](https://modrinth.com/modpacks), or use [packwiz](https://packwiz.infra.link/) to convert other formats of modpack to the Modrinth format.
 
 ```bash
-mrpack-container my-modpack.mrpack ./output --accept-eula
+mrpack-container my-modpack.mrpack ./output
 ```
 
 The output is in OCI format in the given directory, but not compressed. You can use `tar` to compress it into a single file: `tar cf - -C ./output .`.
@@ -66,7 +66,7 @@ tar cf - -C ./output/ . | podman load
 
 You will need to mount:
 - A Minecraft server var, usually at `/var/minecraft/sever.jar`
-- If the eula wasn't accepted at build time, then you'll need to do it now by mounting in a text file containing `eula=true` to `/var/minecraft/eula.txt`.
+- A file to accept the Minecraft [EULA](https://www.minecraft.net/en-us/eula), usually a text file containing `eula=true` at `/var/minecraft/eula.txt`.
 
 And you will probably **want** to mount:
 - A settings file, usually at `/var/minecraft/server.properties`
@@ -74,14 +74,19 @@ And you will probably **want** to mount:
 
 For example:
 ```bash
+# Minecraft 1.20.1
 wget https://piston-data.mojang.com/v1/objects/84194a2f286ef7c14ed7ce0090dba59902951553/server.jar
+# Doing this means you are accepting the Minecraft EULA
+echo "eula=true" > eula.txt
 mkdir world
 podman run \
   -p 25565:25565 \
   -v "$(pwd)"/world:/var/minecraft/world \
   -v "$(pwd)"/server.jar:/var/minecraft/server.jar:ro \
+  -v "$(pwd)"/eula.txt:/var/minecraft/eula.txt:ro \
   <container_id>
 ```
+Will run the server and make it available on `localhost:25565`.
 
 ## Container Structure
 
@@ -89,8 +94,7 @@ podman run \
 - `/lib` with the musl libc library
 - `/usr/local/java` with the JVM
 - `/usr/local/minecraft/lib` with modloader libraries
-- `/usr/share/doc/musl` with copyright information for MUSL
-- `/var/minecraft/eula.txt` if you passed `--accept-eula`
+- `/usr/share/doc/musl` with copyright information for musl
 
 The files and overrides in the Modrinth file are unpacked into `/var/minecraft`.
 Permissions are set as `0755` or `0644`, and most files are owned by root.
@@ -109,6 +113,6 @@ The container makes extensive use of layering:
 - a JRE
 - Your mod loader of choice
 - Each download from the mrpack file, one layer per download 
-- overrides
-- server overrides
-- Minecraft `eula.txt` (if `--accept-eula` is passed) and permissions changes
+- Overrides from the mrpack file
+- Server overrides from the mrpack file
+- Permissions changes

@@ -49,9 +49,6 @@ struct Args {
     #[arg(long, help = "Fixed Java version")]
     java_version: Option<String>,
 
-    #[arg(long, help = "Write a EULA acceptance file into the container")]
-    accept_eula: bool,
-
     #[arg(long, help = "Debug logging output")]
     debug: bool,
 }
@@ -657,27 +654,21 @@ async fn main() -> anyhow::Result<()> {
     );
 
     ////////////////////////////////
-    //// Minecraft Config
+    //// Directory Permissions
     ////////////////////////////////
-    let mut minecraft_layer_builder = TarLayerBuilder::new(&oci_blob_dir).await?;
-    if args.accept_eula {
-        let mut eula_bytes = "eula=true".as_bytes();
-        minecraft_layer_builder
-            .append_file(
-                &FileInfo {
-                    path: Path::new("/var/minecraft/eula.txt").to_path_buf(),
-                    mode: 0o644,
-                    uid: 0,
-                    gid: 0,
-                    last_modified: 0,
-                },
-                eula_bytes.len() as u64,
-                &mut eula_bytes,
-            )
-            .await?;
-    }
+    let mut permissions_layer_builder = TarLayerBuilder::new(&oci_blob_dir).await?;
     // Set permissions on some directories
-    minecraft_layer_builder
+    permissions_layer_builder
+        .append_directory(&layer::FileInfo {
+            path: Path::new("/tmp").to_path_buf(),
+            // World writable
+            mode: 0o777,
+            uid: 0,
+            gid: 0,
+            last_modified: 0,
+        })
+        .await?;
+    permissions_layer_builder
         .append_directory(&layer::FileInfo {
             path: Path::new("/var").to_path_buf(),
             mode: 0o755,
@@ -686,7 +677,7 @@ async fn main() -> anyhow::Result<()> {
             last_modified: 0,
         })
         .await?;
-    minecraft_layer_builder
+    permissions_layer_builder
         .append_directory(&layer::FileInfo {
             path: Path::new("/var/minecraft").to_path_buf(),
             mode: 0o755,
@@ -695,16 +686,8 @@ async fn main() -> anyhow::Result<()> {
             last_modified: 0,
         })
         .await?;
-    minecraft_layer_builder
-        .append_directory(&layer::FileInfo {
-            path: Path::new("/var/minecraft/mods").to_path_buf(),
-            mode: 0o755,
-            uid: 0,
-            gid: 0,
-            last_modified: 0,
-        })
-        .await?;
-    minecraft_layer_builder
+    // This is a commonly-used directory that Minecraft will want to *write* into
+    permissions_layer_builder
         .append_directory(&layer::FileInfo {
             path: Path::new("/var/minecraft/config").to_path_buf(),
             mode: 0o755,
@@ -713,7 +696,7 @@ async fn main() -> anyhow::Result<()> {
             last_modified: 0,
         })
         .await?;
-    minecraft_layer_builder
+    permissions_layer_builder
         .append_directory(&layer::FileInfo {
             path: Path::new("/var/minecraft/libraries").to_path_buf(),
             mode: 0o755,
@@ -722,11 +705,11 @@ async fn main() -> anyhow::Result<()> {
             last_modified: 0,
         })
         .await?;
-    let minecraft_layer = minecraft_layer_builder.finalise().await?;
+    let minecraft_layer = permissions_layer_builder.finalise().await?;
     info!(
         path = ?&minecraft_layer.blob_path,
         digest = &minecraft_layer.digest(),
-        "Created Minecraft Layer"
+        "Created directory permissions Layer"
     );
     layers.push(minecraft_layer);
 
