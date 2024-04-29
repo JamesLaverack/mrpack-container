@@ -31,12 +31,17 @@ jobs:
           merge-multiple: true
       - run: |
           mrpack-conatiner "tests/mrpacks/${{ matrix.mrpackfile }}" ./output 
-          container_id=$(tar cf - -C ./output . | podman load)
-          podman tag "${container_id}" localhost/minecraft
-      - run: |
-          podman run \
-            -p 25565:25565
-            localhost/minecraft:latest
-      - run: python3 -m pip install mcstatus
-      - run: sleep 60
-      - run: mcstatus localhost status
+          wget "https://piston-data.mojang.com/v1/objects/84194a2f286ef7c14ed7ce0090dba59902951553/server.jar"
+          container_id=$(tar cf - -C ./output . | podman load | awk '{ print $3 }')
+          mkdir world
+          running_id=$(podman run \
+            --detatch \
+            --publish 25565:25565 \
+            --volume "$(pwd)"/world:/var/minecraft/world \
+            --volume "$(pwd)"/server.jar:/var/minecraft/server.jar:ro \
+            --volume "$(pwd)"/eula.txt:/var/minecraft/eula.txt:ro \
+            container_id)
+          python3 -m pip install mcstatus
+          sleep 60
+          mcstatus localhost status
+          podman logs $running_id
