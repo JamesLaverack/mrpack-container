@@ -1,6 +1,6 @@
 # mrpack-container
 
-A command line application that turns a Modrinth `.mrpack` file into a ready-to-use container image.
+A command line utility that turns a Modrinth `.mrpack` file into a ready-to-use container image.
 
 `mrpack-container` is:
 - Fast
@@ -32,6 +32,20 @@ NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR 
 In particular, the code quality is awful because this is thrown together.
 Many things are not yet supported. For example, only Quilt works at the moment.
 
+## Installing
+
+Right now you will need to clone this repository with git, and then build the mrpack-container binary with Rust.
+You will need to have a [Rust toolchain](https://www.rust-lang.org/tools/install) installed for your platform.
+
+For example:
+```bash
+git clone https://github.com/JamesLaverack/mrpack-container.git
+cd mrpack-container
+cargo build --release
+```
+
+Or, from inside the `mrpack-container` directory, you can directly build and execute using `cargo run`. 
+
 ## Building Images
 
 You need a Modrinth format modpack file (i.e., a `.mrpack` file).
@@ -41,7 +55,9 @@ You can find these on [Modrinth](https://modrinth.com/modpacks), or use [packwiz
 mrpack-container my-modpack.mrpack ./output --accept-eula
 ```
 
-You can load and execute the produced image directly:
+The output is in OCI format in the given directory, but not compressed. You can use `tar` to compress it into a single file: `tar cf - -C ./output .`.
+
+You can load and execute the produced image directly with a container runtime.
 ```bash
 tar cf - -C ./output/ . | podman load
 ```
@@ -74,8 +90,7 @@ podman run \
 - `/usr/local/java` with the JVM
 - `/usr/local/minecraft/lib` with modloader libraries
 - `/usr/share/doc/musl` with copyright information for MUSL
-- `/var/minecraft/eula.txt` with the result of passing `--accept-eula` or not
-- `/var/minecraft/server.jar` with the Mojang Minecraft server JAR
+- `/var/minecraft/eula.txt` if you passed `--accept-eula`
 
 The files and overrides in the Modrinth file are unpacked into `/var/minecraft`.
 Permissions are set as `0755` or `0644`, and most files are owned by root.
@@ -96,4 +111,4 @@ The container makes extensive use of layering:
 - Each download from the mrpack file, one layer per download 
 - overrides
 - server overrides
-- Minecraft `server.jar`, `eula.txt`, and permissions changes
+- Minecraft `eula.txt` (if `--accept-eula` is passed) and permissions changes
