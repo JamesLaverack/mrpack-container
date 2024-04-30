@@ -22,15 +22,19 @@ use modloaders::quilt;
 use packfile::EnvType;
 
 use crate::arch::Architecture;
-use crate::layer::{Blob, JsonBlobBuilder, TarLayerBuilder};
+use crate::oci_blob::{
+    json::JsonBlobBuilder,
+    layer::{FileInfo, TarLayerBuilder},
+    Blob,
+};
 
 mod adoptium;
 mod arch;
 mod deb;
 mod hash_writer;
-mod layer;
 mod modloaders;
 mod mojang;
+mod oci_blob;
 mod packfile;
 
 #[derive(Parser)]
@@ -85,7 +89,7 @@ async fn extract_overrides_to_layer<R: std::io::Read + std::io::Seek>(
                 let new_filepath = container_dir.join(path.strip_prefix(overrides)?);
                 olayer_builder
                     .append_file(
-                        &layer::FileInfo {
+                        &FileInfo {
                             path: new_filepath.clone(),
                             mode: 0o0644,
                             uid: 0,
@@ -185,7 +189,7 @@ async fn main() -> anyhow::Result<()> {
         .java_version
         .unwrap_or(format!("{}", &manifest.java_version.major_version));
 
-    let mut layers: Vec<layer::Blob> = vec![];
+    let mut layers: Vec<oci_blob::Blob> = vec![];
 
     ////////////////////////////////
     //// MUSL
@@ -212,7 +216,7 @@ async fn main() -> anyhow::Result<()> {
     );
     let mut musl_layer_builder = TarLayerBuilder::new(&oci_blob_dir).await?;
     musl_layer_builder
-        .append_directory(&layer::FileInfo {
+        .append_directory(&FileInfo {
             path: "/lib".into(),
             mode: 0o755,
             uid: 0,
@@ -321,7 +325,7 @@ async fn main() -> anyhow::Result<()> {
                             "Found shared library");
                 musl_layer_builder
                     .append_file(
-                        &layer::FileInfo {
+                        &FileInfo {
                             path: format!("/lib/ld-musl-{}.so.1", arch.linux()).into(),
                             mode: 0o0755,
                             uid: 0,
@@ -340,7 +344,7 @@ async fn main() -> anyhow::Result<()> {
                 container_path.push(path.to_path_buf().to_path_buf());
                 musl_layer_builder
                     .append_file(
-                        &layer::FileInfo {
+                        &FileInfo {
                             path: container_path,
                             mode: 0o0644,
                             uid: 0,
@@ -427,7 +431,7 @@ async fn main() -> anyhow::Result<()> {
         match entry_type {
             EntryType::Directory => {
                 jre_layer_builder
-                    .append_directory(&layer::FileInfo {
+                    .append_directory(&FileInfo {
                         path: p,
                         mode: 0o755,
                         uid: 0,
@@ -453,7 +457,7 @@ async fn main() -> anyhow::Result<()> {
                 };
                 jre_layer_builder
                     .append_file(
-                        &layer::FileInfo {
+                        &FileInfo {
                             path: p,
                             mode,
                             uid: 0,
@@ -499,7 +503,7 @@ async fn main() -> anyhow::Result<()> {
                 );
                 jre_layer_builder
                     .append_symlink(
-                        &layer::FileInfo {
+                        &FileInfo {
                             path: p,
                             mode,
                             uid: 0,
@@ -518,7 +522,7 @@ async fn main() -> anyhow::Result<()> {
     // Write an extra symlink
     jre_layer_builder
         .append_symlink(
-            &layer::FileInfo {
+            &FileInfo {
                 path: Path::new("/bin/java").to_path_buf(),
                 mode: 0o755,
                 uid: 0,
@@ -595,7 +599,7 @@ async fn main() -> anyhow::Result<()> {
             let mut file_layer_builder = TarLayerBuilder::new(&oci_blob_dir).await?;
             let digest: [u8; 64] = file_layer_builder
                 .append_file_from_url(
-                    &layer::FileInfo {
+                    FileInfo {
                         path: container_path.clone(),
                         mode: 0o644,
                         uid: 0,
@@ -658,7 +662,7 @@ async fn main() -> anyhow::Result<()> {
     let mut permissions_layer_builder = TarLayerBuilder::new(&oci_blob_dir).await?;
     // Set permissions on some directories
     permissions_layer_builder
-        .append_directory(&layer::FileInfo {
+        .append_directory(&FileInfo {
             path: Path::new("/tmp").to_path_buf(),
             // World writable
             mode: 0o777,
@@ -668,7 +672,7 @@ async fn main() -> anyhow::Result<()> {
         })
         .await?;
     permissions_layer_builder
-        .append_directory(&layer::FileInfo {
+        .append_directory(&FileInfo {
             path: Path::new("/var").to_path_buf(),
             mode: 0o755,
             uid: 0,
@@ -677,7 +681,7 @@ async fn main() -> anyhow::Result<()> {
         })
         .await?;
     permissions_layer_builder
-        .append_directory(&layer::FileInfo {
+        .append_directory(&FileInfo {
             path: Path::new("/var/minecraft").to_path_buf(),
             mode: 0o755,
             uid: 1000,
@@ -687,7 +691,7 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     // This is a commonly-used directory that Minecraft will want to *write* into
     permissions_layer_builder
-        .append_directory(&layer::FileInfo {
+        .append_directory(&FileInfo {
             path: Path::new("/var/minecraft/config").to_path_buf(),
             mode: 0o755,
             uid: 1000,
@@ -696,7 +700,7 @@ async fn main() -> anyhow::Result<()> {
         })
         .await?;
     permissions_layer_builder
-        .append_directory(&layer::FileInfo {
+        .append_directory(&FileInfo {
             path: Path::new("/var/minecraft/libraries").to_path_buf(),
             mode: 0o755,
             uid: 1000,
@@ -750,7 +754,7 @@ async fn main() -> anyhow::Result<()> {
         }]),
         rootfs: oci_distribution::config::Rootfs {
             r#type: "layers".to_string(),
-            diff_ids: layers.iter().rev().map(layer::Blob::digest).collect(),
+            diff_ids: layers.iter().rev().map(Blob::digest).collect(),
         },
         ..Default::default()
     };

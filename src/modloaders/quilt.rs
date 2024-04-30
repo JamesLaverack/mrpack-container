@@ -1,4 +1,3 @@
-use crate::layer::{Blob, TarLayerBuilder};
 use digest::Digest;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -59,7 +58,7 @@ pub async fn build_quilt_layer(
     minecraft_dir: &Path,
     minecraft_version: &str,
     loader_version: &str,
-) -> anyhow::Result<(JavaConfig, Blob)> {
+) -> anyhow::Result<(JavaConfig, crate::oci_blob::Blob)> {
     // We intentionally don't use the Quilt installer. This saves us from either having to bundle
     // Java and run it now, or include it to be run when the container starts, which would take a
     // while.
@@ -88,7 +87,7 @@ pub async fn build_quilt_layer(
         blob_dir = oci_blob_dir.as_os_str().to_str().unwrap(),
         "Creating Quilt layer"
     );
-    let mut quilt_layer = TarLayerBuilder::new(&oci_blob_dir).await?;
+    let mut quilt_layer = crate::oci_blob::layer::TarLayerBuilder::new(&oci_blob_dir).await?;
 
     let mut jar_paths = Vec::new();
     for lib in server_profile.libraries {
@@ -122,7 +121,7 @@ pub async fn build_quilt_layer(
 
         let digest: [u8; 32] = quilt_layer
             .append_file_from_url(
-                &crate::layer::FileInfo {
+                crate::oci_blob::layer::FileInfo {
                     path: jar_path.clone(),
                     mode: 0o644,
                     uid: 0,
