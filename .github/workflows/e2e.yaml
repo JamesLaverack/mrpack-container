@@ -30,9 +30,12 @@ jobs:
           name: binary
           path: /usr/local/bin
           merge-multiple: true
-      - run: |
-          chmod +x /usr/local/bin/mrpack-container
-          mrpack-container "tests/mrpacks/${{ matrix.mrpackfile }}" ./output 
+      - name: Install mrpack-container
+        run: chmod +x /usr/local/bin/mrpack-container
+      - name: Build Container
+        run: mrpack-container "tests/mrpacks/${{ matrix.mrpackfile }}" ./output 
+      - name: Run Container
+        run: |
           wget --no-verbose "https://piston-data.mojang.com/v1/objects/84194a2f286ef7c14ed7ce0090dba59902951553/server.jar"
           container_id=$(tar cf - -C ./output . | podman load | awk '{ print $3 }')
           mkdir /tmp/world
@@ -45,7 +48,17 @@ jobs:
             --volume "$(pwd)"/server.jar:/var/minecraft/server.jar:ro \
             --volume "$(pwd)"/eula.txt:/var/minecraft/eula.txt:ro \
             "$container_id")
+      - name: Verify Container is hosting a Minecraft Server 
+        run: |
           python3 -m pip install mcstatus
           sleep 60
           podman logs "$running_id"
           mcstatus localhost status
+      - name: Verify world save
+        run: |
+          if [ -f /var/world/level.dat ]; then
+            echo "Level file found in expected location"
+          else
+            echo "Level file not found!"
+            false
+          fi
