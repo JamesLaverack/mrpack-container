@@ -36,6 +36,7 @@ jobs:
           wget --no-verbose "https://piston-data.mojang.com/v1/objects/84194a2f286ef7c14ed7ce0090dba59902951553/server.jar"
           container_id=$(tar cf - -C ./output . | podman load | awk '{ print $3 }')
           mkdir world
+          echo "eula=true" > eula.txt
           running_id=$(podman run \
             --detach \
             --publish 25565:25565 \
