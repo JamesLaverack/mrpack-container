@@ -2,7 +2,6 @@ use crate::hash_writer;
 use crate::hash_writer::HashWriterAsync;
 use async_compression::tokio::write::GzipEncoder;
 use digest::Digest;
-use oci_spec::image::MediaType;
 use rand::distributions::{Alphanumeric, DistString};
 use sha2::Sha256;
 use std::io;
@@ -289,7 +288,7 @@ impl TarLayerBuilder {
         Ok(super::Blob {
             blob_path: tarfile_path,
             sha256_checksum: sha256,
-            media_type: MediaType::ImageLayerGzip,
+            media_type: oci_distribution::manifest::IMAGE_LAYER_GZIP_MEDIA_TYPE.to_string(),
             size: total_bytes as u64,
         })
     }

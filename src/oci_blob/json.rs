@@ -1,6 +1,5 @@
 use super::LayerBuilderError::{JsonError, NotAJsonMediaType};
 use crate::hash_writer::HashWriterAsync;
-use oci_spec::image::MediaType;
 use rand::distributions::{Alphanumeric, DistString};
 use serde::Serialize;
 use sha2::Sha256;
@@ -13,15 +12,15 @@ pub struct JsonBlobBuilder {
     blob_dir: PathBuf,
     tmp_tarfile_path: PathBuf,
     writer: HashWriterAsync<File, Sha256>,
-    media_type: MediaType,
+    media_type: String,
 }
 
 impl JsonBlobBuilder {
     pub async fn new(
         blob_dir: &Path,
-        media_type: MediaType,
+        media_type: String,
     ) -> Result<JsonBlobBuilder, super::LayerBuilderError> {
-        if !format!("{}", media_type).ends_with("+json") {
+        if !media_type.ends_with("+json") {
             return Err(NotAJsonMediaType { media_type });
         }
         let mut filename = ".tmp-".to_owned();

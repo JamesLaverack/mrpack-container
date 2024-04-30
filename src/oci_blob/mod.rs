@@ -1,5 +1,4 @@
 use oci_distribution::manifest::OciDescriptor;
-use oci_spec::image::MediaType;
 use std::io;
 use std::path::{PathBuf, StripPrefixError};
 
@@ -9,7 +8,7 @@ pub mod layer;
 pub struct Blob {
     pub blob_path: PathBuf,
     pub sha256_checksum: [u8; 32],
-    pub media_type: MediaType,
+    pub media_type: String,
     pub size: u64,
 }
 
@@ -23,7 +22,7 @@ impl From<&Blob> for OciDescriptor {
     fn from(layer: &Blob) -> OciDescriptor {
         OciDescriptor {
             digest: layer.digest(),
-            media_type: layer.media_type.to_string(),
+            media_type: layer.media_type.clone(),
             size: layer.size as i64,
             ..Default::default()
         }
@@ -65,5 +64,5 @@ pub enum LayerBuilderError {
     #[error("Failed to render Json")]
     JsonError { source: serde_json::Error },
     #[error("The media type {media_type} is not a JSON media type")]
-    NotAJsonMediaType { media_type: MediaType },
+    NotAJsonMediaType { media_type: String },
 }

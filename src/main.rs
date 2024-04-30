@@ -9,10 +9,8 @@ use clap::Parser;
 use futures::io::ErrorKind;
 use futures::prelude::*;
 use oci_distribution::{config::ConfigFile, manifest::OciDescriptor};
-use oci_spec::image::MediaType;
 use sha2::{Digest, Sha512};
 use tar::EntryType;
-use thiserror::Error;
 use tokio::io::{AsyncReadExt, BufReader};
 #[allow(unused_imports)]
 use tracing::{debug, error, info, trace, warn};
@@ -54,20 +52,6 @@ struct Args {
 
     #[arg(long, help = "Debug logging output")]
     debug: bool,
-}
-
-#[derive(Error, Debug)]
-#[error("image name '{image_name}' invalid")]
-pub struct ImageNameParseError {
-    image_name: String,
-}
-
-#[derive(Debug, Error)]
-pub enum RegistryError {
-    #[error("got error from registry")]
-    ErrorResponse(oci_spec::distribution::ErrorResponse),
-    #[error("JSON parse error")]
-    ParseError(serde_json::Error),
 }
 
 async fn extract_overrides_to_layer<R: std::io::Read + std::io::Seek>(
@@ -760,8 +744,11 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Write out the config JSON file.
-    let mut config_blob_builder =
-        JsonBlobBuilder::new(&oci_blob_dir, MediaType::ImageConfig).await?;
+    let mut config_blob_builder = JsonBlobBuilder::new(
+        &oci_blob_dir,
+        oci_distribution::manifest::IMAGE_CONFIG_MEDIA_TYPE.to_string(),
+    )
+    .await?;
     config_blob_builder.append_json(&config_file).await?;
     let config_blob = config_blob_builder.finalise().await?;
     info!(
@@ -774,13 +761,16 @@ async fn main() -> anyhow::Result<()> {
     //// CONTAINER MANIFEST
     ////////////////////////////////
     let container_manifest = oci_distribution::manifest::OciImageManifest {
-        media_type: Some(MediaType::ImageManifest.to_string()),
+        media_type: Some(oci_distribution::manifest::IMAGE_MANIFEST_MEDIA_TYPE.to_string()),
         config: OciDescriptor::from(&config_blob),
         layers: layers.iter().map(OciDescriptor::from).collect(),
         ..Default::default()
     };
-    let mut manifest_blob_builder =
-        JsonBlobBuilder::new(&oci_blob_dir, MediaType::ImageManifest).await?;
+    let mut manifest_blob_builder = JsonBlobBuilder::new(
+        &oci_blob_dir,
+        oci_distribution::manifest::IMAGE_MANIFEST_MEDIA_TYPE.to_string(),
+    )
+    .await?;
     manifest_blob_builder
         .append_json(&container_manifest)
         .await?;
@@ -798,7 +788,7 @@ async fn main() -> anyhow::Result<()> {
     ////////////////////////////////
     let container_index = oci_distribution::manifest::OciImageIndex {
         schema_version: 2,
-        media_type: Some(MediaType::ImageIndex.to_string()),
+        media_type: Some(oci_distribution::manifest::OCI_IMAGE_MEDIA_TYPE.to_string()),
         manifests: vec![oci_distribution::manifest::ImageIndexEntry {
             media_type: manifest_blob.media_type.to_string(),
             size: manifest_blob.size as i64,
@@ -814,7 +804,7 @@ async fn main() -> anyhow::Result<()> {
             annotations: None,
         }],
         annotations: Some(HashMap::from([(
-            "org.opencontainers.image.ref.name".to_string(),
+            oci_distribution::annotations::ORG_OPENCONTAINERS_IMAGE_REF_NAME.to_string(),
             index.name,
         )])),
     };
