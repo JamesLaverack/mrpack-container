@@ -42,8 +42,8 @@ jobs:
             --volume "$(pwd)"/world:/var/minecraft/world \
             --volume "$(pwd)"/server.jar:/var/minecraft/server.jar:ro \
             --volume "$(pwd)"/eula.txt:/var/minecraft/eula.txt:ro \
-            container_id)
+            "$container_id")
           python3 -m pip install mcstatus
           sleep 60
           mcstatus localhost status
-          podman logs $running_id
+          podman logs "$running_id"
