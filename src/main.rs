@@ -22,12 +22,11 @@ use modloaders::quilt;
 use packfile::EnvType;
 
 use crate::arch::Architecture;
-use crate::layer::{Blob, FileInfo, JsonBlobBuilder, TarLayerBuilder};
+use crate::layer::{Blob, JsonBlobBuilder, TarLayerBuilder};
 
 mod adoptium;
 mod arch;
 mod deb;
-mod download;
 mod hash_writer;
 mod layer;
 mod modloaders;
