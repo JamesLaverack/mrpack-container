@@ -32,6 +32,8 @@ jobs:
           merge-multiple: true
       - run: |
           chmod +x /usr/local/bin/mrpack-container
+          ls -l /usr/local/bin/mrpack-container
+          echo "$PATH"
           mrpack-conatiner "tests/mrpacks/${{ matrix.mrpackfile }}" ./output 
           wget "https://piston-data.mojang.com/v1/objects/84194a2f286ef7c14ed7ce0090dba59902951553/server.jar"
           container_id=$(tar cf - -C ./output . | podman load | awk '{ print $3 }')
