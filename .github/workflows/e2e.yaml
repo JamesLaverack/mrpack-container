@@ -46,5 +46,5 @@ jobs:
             "$container_id")
           python3 -m pip install mcstatus
           sleep 60
-          mcstatus localhost status
           podman logs "$running_id"
+          mcstatus localhost status
