@@ -56,6 +56,7 @@ jobs:
           mcstatus localhost status
       - name: Verify world save
         run: |
+          ls /var/world
           if [ -f /var/world/level.dat ]; then
             echo "Level file found in expected location"
           else
