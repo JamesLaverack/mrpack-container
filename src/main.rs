@@ -761,14 +761,14 @@ async fn main() -> anyhow::Result<()> {
     //// CONTAINER MANIFEST
     ////////////////////////////////
     let container_manifest = oci_distribution::manifest::OciImageManifest {
-        media_type: Some(oci_distribution::manifest::IMAGE_MANIFEST_MEDIA_TYPE.to_string()),
+        media_type: Some(oci_distribution::manifest::OCI_IMAGE_MEDIA_TYPE.to_string()),
         config: OciDescriptor::from(&config_blob),
         layers: layers.iter().map(OciDescriptor::from).collect(),
         ..Default::default()
     };
     let mut manifest_blob_builder = JsonBlobBuilder::new(
         &oci_blob_dir,
-        oci_distribution::manifest::IMAGE_MANIFEST_MEDIA_TYPE.to_string(),
+        oci_distribution::manifest::OCI_IMAGE_MEDIA_TYPE.to_string(),
     )
     .await?;
     manifest_blob_builder
@@ -788,7 +788,7 @@ async fn main() -> anyhow::Result<()> {
     ////////////////////////////////
     let container_index = oci_distribution::manifest::OciImageIndex {
         schema_version: 2,
-        media_type: Some(oci_distribution::manifest::OCI_IMAGE_MEDIA_TYPE.to_string()),
+        media_type: Some(oci_distribution::manifest::OCI_IMAGE_INDEX_MEDIA_TYPE.to_string()),
         manifests: vec![oci_distribution::manifest::ImageIndexEntry {
             media_type: manifest_blob.media_type.to_string(),
             size: manifest_blob.size as i64,
