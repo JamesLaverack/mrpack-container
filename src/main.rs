@@ -59,12 +59,14 @@ async fn extract_overrides_to_layer<R: std::io::Read + std::io::Seek>(
     oci_blob_dir: &Path,
     container_dir: &Path,
     overrides: &str,
-) -> anyhow::Result<Blob> {
+) -> anyhow::Result<Option<Blob>> {
     let mut olayer_builder = TarLayerBuilder::new(oci_blob_dir).await?;
+    let mut found_overrides = false;
     for i in 0..zipfile.len() {
         let mut file = zipfile.by_index(i)?;
         if let Some(path) = file.enclosed_name().map(|e| e.to_path_buf()) {
             if path.starts_with(overrides) && file.is_file() {
+                found_overrides = true;
                 // This code is actually awful. We're reading the entire override file into
                 // memory. Then streaming it all out. Fine for a few KB of config file. Not fine if
                 // someone has a few hundred MB of JAR file in here.
@@ -75,7 +77,11 @@ async fn extract_overrides_to_layer<R: std::io::Read + std::io::Seek>(
                     .append_file(
                         &FileInfo {
                             path: new_filepath.clone(),
-                            mode: 0o0644,
+                            mode: if guess_is_writable(&new_filepath) {
+                                0o0666
+                            } else {
+                                0o0644
+                            },
                             uid: 0,
                             gid: 0,
                             last_modified: 0,
@@ -92,15 +98,28 @@ async fn extract_overrides_to_layer<R: std::io::Read + std::io::Seek>(
             }
         }
     }
-    let layer = olayer_builder.finalise().await?;
-    info!(
-        path = ?&layer.blob_path,
-        digest = &layer.digest(),
-        overrides = overrides,
-        "Created Overrides Layer"
-    );
-    Ok(layer)
+    Ok(if found_overrides {
+        let layer = olayer_builder.finalise().await?;
+        info!(
+            path = ?&layer.path,
+            digest = &layer.digest(),
+            overrides = overrides,
+            "Created Overrides Layer"
+        );
+        Some(layer)
+    } else {
+        olayer_builder.cancel().await?;
+        None
+    })
 }
+
+// Some files and directories are expected to be writable by various mods. However, the MRPACK
+// format does not encode any permission information. Instead, we'll have to guess if it should
+// be writable or read-only based on the filename.
+fn guess_is_writable(path: &Path) -> bool {
+    path.iter().next().map(|p| p == "config").unwrap_or(false)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // TODO break this function out so it's not hundreds of lines long
@@ -281,7 +300,8 @@ async fn main() -> anyhow::Result<()> {
     // data.tar.xz data stream
     let compressed_musl_data_stream = &mut (&mut musl_tar_stream).take(data_file_size);
     let mut buffered_compressed_musl_data_stream = BufReader::new(compressed_musl_data_stream);
-    let mut musl_data_stream = XzDecoder::new(&mut buffered_compressed_musl_data_stream);
+    let mut musl_data_stream =
+        BufReader::new(XzDecoder::new(&mut buffered_compressed_musl_data_stream));
     loop {
         let mut header_bytes: [u8; 512] = [0; 512];
         (&mut musl_data_stream)
@@ -367,7 +387,7 @@ async fn main() -> anyhow::Result<()> {
 
     let musl_layer = musl_layer_builder.finalise().await?;
     info!(
-        path = ?musl_layer.blob_path,
+        path = ?musl_layer.path,
         digest = musl_layer.digest(),
         "Created MUSL Layer"
     );
@@ -385,11 +405,11 @@ async fn main() -> anyhow::Result<()> {
 
     // Download and stream into a layer
     let request = reqwest::get(jre_download.url).await?;
-    let mut jre_tar_stream = GzipDecoder::new(tokio_util::io::StreamReader::new(
+    let mut jre_tar_stream = BufReader::new(GzipDecoder::new(tokio_util::io::StreamReader::new(
         request
             .bytes_stream()
             .map_err(|e| std::io::Error::new(ErrorKind::Other, e)),
-    ));
+    )));
     let container_path = Path::new("/usr/local/java");
     let mut jre_layer_builder = TarLayerBuilder::new(&oci_blob_dir).await?;
     loop {
@@ -518,7 +538,7 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     let jre_layer = jre_layer_builder.finalise().await?;
     info!(
-        path = ?jre_layer.blob_path,
+        path = ?jre_layer.path,
         digest = jre_layer.digest(),
         "Created JRE Layer"
     );
@@ -585,7 +605,11 @@ async fn main() -> anyhow::Result<()> {
                 .append_file_from_url(
                     FileInfo {
                         path: container_path.clone(),
-                        mode: 0o644,
+                        mode: if guess_is_writable(&container_path) {
+                            0o666
+                        } else {
+                            0o644
+                        },
                         uid: 0,
                         gid: 0,
                         last_modified: 0,
@@ -607,7 +631,7 @@ async fn main() -> anyhow::Result<()> {
             }
             let file_layer = file_layer_builder.finalise().await?;
             info!(
-                path = ?&file_layer.blob_path,
+                path = ?&file_layer.path,
                 digest = &file_layer.digest(),
                 sha512 = hex::encode_upper(digest),
                 container_path = ?&container_path,
@@ -621,24 +645,23 @@ async fn main() -> anyhow::Result<()> {
     ////////////////////////////////
     //// OVERRIDES
     ////////////////////////////////
-    layers.push(
-        extract_overrides_to_layer(
-            &mut zipfile,
-            &oci_blob_dir,
-            &Path::new("/var/minecraft"),
-            "overrides",
-        )
-        .await?,
-    );
-    layers.push(
-        extract_overrides_to_layer(
-            &mut zipfile,
-            &oci_blob_dir,
-            &Path::new("/var/minecraft"),
-            "server-overrides",
-        )
-        .await?,
-    );
+    extract_overrides_to_layer(
+        &mut zipfile,
+        &oci_blob_dir,
+        &Path::new("/var/minecraft"),
+        "overrides",
+    )
+    .await?
+    .map(|l| layers.push(l));
+
+    extract_overrides_to_layer(
+        &mut zipfile,
+        &oci_blob_dir,
+        &Path::new("/var/minecraft"),
+        "server-overrides",
+    )
+    .await?
+    .map(|l| layers.push(l));
 
     ////////////////////////////////
     //// Directory Permissions
@@ -694,7 +717,7 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     let minecraft_layer = permissions_layer_builder.finalise().await?;
     info!(
-        path = ?&minecraft_layer.blob_path,
+        path = ?&minecraft_layer.path,
         digest = &minecraft_layer.digest(),
         "Created directory permissions Layer"
     );
@@ -738,7 +761,7 @@ async fn main() -> anyhow::Result<()> {
         }]),
         rootfs: oci_distribution::config::Rootfs {
             r#type: "layers".to_string(),
-            diff_ids: layers.iter().rev().map(Blob::digest).collect(),
+            diff_ids: layers.iter().map(Blob::diff_id_digest).collect(),
         },
         ..Default::default()
     };
@@ -752,7 +775,7 @@ async fn main() -> anyhow::Result<()> {
     config_blob_builder.append_json(&config_file).await?;
     let config_blob = config_blob_builder.finalise().await?;
     info!(
-        path = ?config_blob.blob_path,
+        path = ?config_blob.path,
         digest = config_blob.digest(),
         "Wrote Container Config file"
     );
@@ -778,7 +801,7 @@ async fn main() -> anyhow::Result<()> {
     // Write the manifest. In a docker image this is a file in the root named manifest.json
     // in an OCI image it's also a blob.
     info!(
-        path = ?manifest_blob.blob_path,
+        path = ?manifest_blob.path,
         digest = manifest_blob.digest(),
         "Wrote Container Image Manifest file"
     );
@@ -791,7 +814,7 @@ async fn main() -> anyhow::Result<()> {
         media_type: Some(oci_distribution::manifest::OCI_IMAGE_INDEX_MEDIA_TYPE.to_string()),
         manifests: vec![oci_distribution::manifest::ImageIndexEntry {
             media_type: manifest_blob.media_type.to_string(),
-            size: manifest_blob.size as i64,
+            size: manifest_blob.compressed_size as i64,
             digest: manifest_blob.digest(),
             platform: Some(oci_distribution::manifest::Platform {
                 architecture: arch.docker().to_string(),

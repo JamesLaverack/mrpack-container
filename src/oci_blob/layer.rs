@@ -1,16 +1,17 @@
 use crate::hash_writer;
 use crate::hash_writer::HashWriterAsync;
 use async_compression::tokio::write::GzipEncoder;
+use async_compression::Level;
 use digest::Digest;
+use futures_util::TryStreamExt;
 use rand::distributions::{Alphanumeric, DistString};
 use sha2::Sha256;
 use std::io;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use futures_util::TryStreamExt;
 use tokio::fs::File;
-use tokio::io::AsyncRead;
 use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufRead, BufReader};
 use tracing::debug;
 use url::Url;
 
@@ -26,7 +27,7 @@ pub struct FileInfo {
 pub struct TarLayerBuilder {
     blob_dir: PathBuf,
     tmp_tarfile_path: PathBuf,
-    writer: GzipEncoder<HashWriterAsync<File, Sha256>>,
+    writer: HashWriterAsync<GzipEncoder<HashWriterAsync<File, Sha256>>, Sha256>,
 }
 
 impl TarLayerBuilder {
@@ -36,13 +37,14 @@ impl TarLayerBuilder {
         filename.push_str(".tar");
         let mut tmp_tarfile_path = blob_dir.to_path_buf();
         tmp_tarfile_path.push(filename);
-        let writer = GzipEncoder::new(HashWriterAsync::new_sha256(
-            File::create(&tmp_tarfile_path).await.map_err(|s| {
+        let writer = HashWriterAsync::new_sha256(GzipEncoder::with_quality(
+            HashWriterAsync::new_sha256(File::create(&tmp_tarfile_path).await.map_err(|s| {
                 super::LayerBuilderError::TmpFileCreation {
                     path: tmp_tarfile_path.clone(),
                     source: s,
                 }
-            })?,
+            })?),
+            Level::Best,
         ));
 
         return Ok(TarLayerBuilder {
@@ -65,7 +67,7 @@ impl TarLayerBuilder {
             }
         })?;
         let expected_size = request.content_length().unwrap();
-        let mut stream = hash_writer::HashReaderAsync::new(
+        let stream = hash_writer::HashReaderAsync::new(
             hasher,
             tokio_util::io::StreamReader::new(
                 request
@@ -73,9 +75,10 @@ impl TarLayerBuilder {
                     .map_err(|e| io::Error::new(ErrorKind::Other, e)),
             ),
         );
-        self.append_file(&file_info, expected_size, &mut stream)
+        let mut buf_stream = BufReader::with_capacity(256 * 1024 * 1024, stream);
+        self.append_file(&file_info, expected_size, &mut buf_stream)
             .await?;
-        let (_, output) = stream.into_inner();
+        let (_, output) = buf_stream.into_inner().into_inner();
         return Ok(output);
     }
 
@@ -121,7 +124,7 @@ impl TarLayerBuilder {
         Ok(())
     }
 
-    pub async fn append_file<R: AsyncRead + std::marker::Unpin>(
+    pub async fn append_file<R: AsyncBufRead + std::marker::Unpin>(
         &mut self,
         file_info: &FileInfo,
         file_size: u64,
@@ -159,7 +162,7 @@ impl TarLayerBuilder {
                 source: s,
             }
         })?;
-        let written = tokio::io::copy(bytes, &mut self.writer)
+        let written = tokio::io::copy_buf(bytes, &mut self.writer)
             .await
             .map_err(|s| super::LayerBuilderError::TmpFileWrite {
                 path: self.tmp_tarfile_path.clone(),
@@ -268,8 +271,9 @@ impl TarLayerBuilder {
                 path: self.tmp_tarfile_path.clone(),
                 source: s,
             })?;
-        let (_, sha256, total_bytes): (File, [u8; 32], usize) =
-            self.writer.into_inner().into_inner_sha256();
+        let (inner, diff_id, _) = self.writer.into_inner_sha256();
+        let (_, sha256, total_compressed_bytes): (File, [u8; 32], usize) =
+            inner.into_inner().into_inner_sha256();
         // Rename it to the checksum
         let mut tarfile_path = self.blob_dir;
         tarfile_path.push(hex::encode(sha256));
@@ -286,10 +290,30 @@ impl TarLayerBuilder {
             "Finished layer"
         );
         Ok(super::Blob {
-            blob_path: tarfile_path,
-            sha256_checksum: sha256,
+            path: tarfile_path,
+            compressed_sha256_checksum: sha256,
+            uncompressed_sha256_checksum: diff_id,
             media_type: oci_distribution::manifest::IMAGE_LAYER_GZIP_MEDIA_TYPE.to_string(),
-            size: total_bytes as u64,
+            compressed_size: total_compressed_bytes as u64,
         })
+    }
+
+    pub async fn cancel(mut self) -> Result<(), super::LayerBuilderError> {
+        self.writer
+            .shutdown()
+            .await
+            .map_err(|s| super::LayerBuilderError::TmpFileWrite {
+                path: self.tmp_tarfile_path.clone(),
+                source: s,
+            })?;
+        // Rename it to the checksum
+        tokio::fs::remove_file(&self.tmp_tarfile_path)
+            .await
+            .map_err(|s| super::LayerBuilderError::TmpFileDelete {
+                path: self.tmp_tarfile_path.clone(),
+                source: s,
+            })?;
+        debug!("Cancelled layer");
+        Ok(())
     }
 }

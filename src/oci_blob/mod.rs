@@ -6,15 +6,20 @@ pub mod json;
 pub mod layer;
 
 pub struct Blob {
-    pub blob_path: PathBuf,
-    pub sha256_checksum: [u8; 32],
+    pub path: PathBuf,
+    pub compressed_sha256_checksum: [u8; 32],
+    pub uncompressed_sha256_checksum: [u8; 32],
     pub media_type: String,
-    pub size: u64,
+    pub compressed_size: u64,
 }
 
 impl Blob {
     pub fn digest(&self) -> String {
-        format!("sha256:{}", hex::encode(self.sha256_checksum))
+        format!("sha256:{}", hex::encode(self.compressed_sha256_checksum))
+    }
+
+    pub fn diff_id_digest(&self) -> String {
+        format!("sha256:{}", hex::encode(self.uncompressed_sha256_checksum))
     }
 }
 
@@ -23,7 +28,7 @@ impl From<&Blob> for OciDescriptor {
         OciDescriptor {
             digest: layer.digest(),
             media_type: layer.media_type.clone(),
-            size: layer.size as i64,
+            size: layer.compressed_size as i64,
             ..Default::default()
         }
     }
@@ -50,6 +55,8 @@ pub enum LayerBuilderError {
     },
     #[error("Failed to write to tar file '{path}'")]
     TmpFileWrite { path: PathBuf, source: io::Error },
+    #[error("Failed to delete tmp tar file '{path}'")]
+    TmpFileDelete { path: PathBuf, source: io::Error },
     #[error("Failed to rename tar file from temporary name '{from_path}' to final blob name '{to_path}'")]
     TmpFileRename {
         from_path: PathBuf,

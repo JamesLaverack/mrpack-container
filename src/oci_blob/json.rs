@@ -84,10 +84,12 @@ impl JsonBlobBuilder {
             "Finished layer"
         );
         Ok(super::Blob {
-            blob_path: tarfile_path,
-            sha256_checksum: sha256,
-            size: total_bytes as u64,
+            path: tarfile_path,
             media_type: self.media_type,
+            uncompressed_sha256_checksum: sha256,
+            // No compression, so these are the same
+            compressed_sha256_checksum: sha256,
+            compressed_size: total_bytes as u64,
         })
     }
 }

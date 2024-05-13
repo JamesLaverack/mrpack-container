@@ -152,9 +152,8 @@ pub async fn build_quilt_layer(
     info!(
         quilt_loader_version = &loader_version,
         minecraft_version = &minecraft_version,
-        layer_sha256 = hex::encode_upper(l.sha256_checksum),
         digest = l.digest(),
-        layer_path = ?l.blob_path,
+        layer_path = ?l.path,
         "Created Quilt layer"
     );
 
