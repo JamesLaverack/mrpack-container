@@ -1,4 +1,4 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 // Based on Modrinth documentation https://docs.modrinth.com/docs/modpacks/format_definition/
@@ -56,4 +56,3 @@ pub enum EnvType {
     Optional,
     Unsupported,
 }
-
