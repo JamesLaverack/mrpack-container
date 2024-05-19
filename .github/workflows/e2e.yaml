@@ -8,10 +8,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: |
-          rustup update --no-self-update stable
-          rustup component add --toolchain stable rustfmt
-          rustup default stable
+      - name: Install Rust Toolchain
+        run: |
+          rustup update --no-self-update
       - run: cargo build --release --locked
       - uses: actions/upload-artifact@v4
         with:

@@ -1,0 +1,15 @@
+name: Lint
+
+on:
+  push: {}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust Toolchain
+        run: |
+          rustup update --no-self-update
+          rustup component add rustfmt
+      - run: cargo fmt --check
