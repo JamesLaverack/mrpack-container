@@ -8,9 +8,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust Toolchain
-        run: |
-          rustup update --no-self-update
       - run: cargo build --release --locked
       - uses: actions/upload-artifact@v4
         with:
