@@ -11,7 +11,7 @@ use super::JavaConfig;
 #[serde(rename_all = "camelCase")]
 pub struct ServerLaunchProfile {
     pub id: String,
-    pub launcher_main_class: String,
+    pub main_class: String,
     pub libraries: Vec<Library>,
 }
 
@@ -53,20 +53,20 @@ pub fn split_artefact(artefact: &str) -> anyhow::Result<(Vec<&str>, &str, &str)>
     return Ok((group_id, artifact_id, version));
 }
 
-pub async fn build_quilt_layer(
+pub async fn build_fabric_layer(
     oci_blob_dir: &Path,
     minecraft_dir: &Path,
     minecraft_version: &str,
     loader_version: &str,
 ) -> anyhow::Result<(JavaConfig, crate::oci_blob::Blob)> {
-    // We intentionally don't use the Quilt installer. This saves us from either having to bundle
+    // We intentionally don't use the Fabric installer. This saves us from either having to bundle
     // Java and run it now, or include it to be run when the container starts, which would take a
     // while.
 
     // Download the server profile document
     let server_profile_url: PathBuf = [
-        "https://meta.quiltmc.org",
-        "v3",
+        "https://meta.fabricmc.net",
+        "v2",
         "versions",
         "loader",
         &minecraft_version,
@@ -85,9 +85,9 @@ pub async fn build_quilt_layer(
 
     info!(
         blob_dir = oci_blob_dir.as_os_str().to_str().unwrap(),
-        "Creating Quilt layer"
+        "Creating Fabric layer"
     );
-    let mut quilt_layer = crate::oci_blob::layer::TarLayerBuilder::new(&oci_blob_dir).await?;
+    let mut fabric_layer = crate::oci_blob::layer::TarLayerBuilder::new(&oci_blob_dir).await?;
 
     let mut jar_paths = Vec::new();
     for lib in server_profile.libraries {
@@ -119,7 +119,7 @@ pub async fn build_quilt_layer(
         jar_path.push(version);
         jar_path.push(&jar_name);
 
-        let digest: [u8; 32] = quilt_layer
+        let digest: [u8; 32] = fabric_layer
             .append_file_from_url(
                 crate::oci_blob::layer::FileInfo {
                     path: jar_path.clone(),
@@ -148,21 +148,25 @@ pub async fn build_quilt_layer(
 
         jar_paths.push(jar_path.to_path_buf());
     }
-    let l = quilt_layer.finalise().await?;
+    let l = fabric_layer.finalise().await?;
     info!(
         quilt_loader_version = &loader_version,
         minecraft_version = &minecraft_version,
+        main_class = &server_profile.main_class,
         digest = l.digest(),
-        main_class = &server_profile.launcher_main_class,
         layer_path = ?l.path,
-        "Created Quilt layer"
+        "Created Fabric layer"
     );
 
     Ok((
         JavaConfig {
             jars: jar_paths,
-            main_class: server_profile.launcher_main_class,
-            properties: [].into(),
+            main_class: server_profile.main_class,
+            properties: [(
+                "fabric.gameJarPath.server".to_string(),
+                "/usr/local/minecraft/server.jar".to_string(),
+            )]
+            .into(),
         },
         l,
     ))

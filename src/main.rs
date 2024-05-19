@@ -16,7 +16,7 @@ use tokio::io::{AsyncReadExt, BufReader};
 use tracing::{debug, error, info, trace, warn};
 use tracing_subscriber;
 
-use modloaders::quilt;
+use modloaders::{fabric, quilt};
 use packfile::EnvType;
 
 use crate::arch::Architecture;
@@ -552,9 +552,15 @@ async fn main() -> anyhow::Result<()> {
     // a configuration function back
     let java_config;
     let modloader_layer;
-    if let Some(_fabric_version) = &index.dependencies.fabric_loader {
-        // TODO Support Fabric
-        anyhow::bail!("fabric not yet supported");
+    if let Some(fabric_version) = &index.dependencies.fabric_loader {
+        info!(fabric_version = &fabric_version, "Using Fabric modloader");
+        (java_config, modloader_layer) = fabric::build_fabric_layer(
+            &oci_blob_dir,
+            Path::new("/usr/local/minecraft/lib/"),
+            &index.dependencies.minecraft,
+            &fabric_version,
+        )
+        .await?;
     } else if let Some(quilt_version) = &index.dependencies.quilt_loader {
         info!(quilt_version = &quilt_version, "Using Quilt modloader");
         (java_config, modloader_layer) = quilt::build_quilt_layer(
@@ -726,6 +732,26 @@ async fn main() -> anyhow::Result<()> {
     ////////////////////////////////
     //// CONTAINER CONFIG
     ////////////////////////////////
+    let mut cmd: Vec<String> = vec![];
+    // We don't create a custom JAR with everything bundled in, so instead set the classpath to
+    // the individual JAR libraries, and set the main class this way.
+    cmd.push(
+        "--class-path".to_string()
+            + "="
+            + &*(java_config
+                .jars
+                .into_iter()
+                .map(|p| p.as_os_str().to_str().unwrap().to_string())
+                .collect::<Vec<String>>()
+                .join(":")),
+    );
+    cmd.extend(
+        java_config
+            .properties
+            .iter()
+            .map(|(k, v)| format!("-D{}={}", k, v)),
+    );
+    cmd.push(java_config.main_class);
     let config_file = ConfigFile {
         architecture: arch.oci(),
         os: oci_distribution::config::Os::Linux,
@@ -735,22 +761,7 @@ async fn main() -> anyhow::Result<()> {
             // The default Minecraft server port
             exposed_ports: Some(HashSet::from(["25565/tcp".to_string()])),
             entrypoint: Some(vec!["/bin/java".to_string()]),
-            cmd: Some(
-                [
-                    // We don't create a custom JAR with everything bundled in, so instead set the classpath to
-                    // the individual JAR libraries, and set the main class this way.
-                    "--class-path".to_string()
-                        + "="
-                        + &*(java_config
-                            .jars
-                            .into_iter()
-                            .map(|p| p.as_os_str().to_str().unwrap().to_string())
-                            .collect::<Vec<String>>()
-                            .join(":")),
-                    java_config.main_class,
-                ]
-                .to_vec(),
-            ),
+            cmd: Some(cmd),
             working_dir: Some("/var/minecraft".to_string()),
             ..Default::default()
         }),
