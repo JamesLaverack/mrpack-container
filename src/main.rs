@@ -74,13 +74,14 @@ async fn extract_overrides_to_layer<R: std::io::Read + std::io::Seek>(
                 let mut bytes = Vec::with_capacity(file.size() as usize);
                 std::io::copy(&mut file, &mut bytes)?;
                 let mrpack_path = path.strip_prefix(overrides)?;
+                let writable = guess_is_writable(&mrpack_path);
                 let mut new_filepath = in_container_minecraft_config.minecraft_working_dir.clone();
                 new_filepath.push(mrpack_path);
                 olayer_builder
                     .append_file(
                         &FileInfo {
                             path: new_filepath.clone(),
-                            mode: if guess_is_writable(&new_filepath) {
+                            mode: if writable {
                                 0o0666
                             } else {
                                 0o0644
@@ -96,6 +97,7 @@ async fn extract_overrides_to_layer<R: std::io::Read + std::io::Seek>(
                 info!(
                     path = ?new_filepath,
                     overrides = overrides,
+                    writable = if writable { "yes" } else { "no" },
                     "Unpacked overrides file"
                 );
             }
