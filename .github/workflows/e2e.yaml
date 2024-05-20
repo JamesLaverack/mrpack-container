@@ -18,7 +18,7 @@ jobs:
     needs: build
     strategy:
       matrix:
-        mrpackfile: [quilt-simple.mrpack]
+        mrpackfile: [quilt-simple.mrpack, fabric-simple.mrpack]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
