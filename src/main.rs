@@ -626,7 +626,7 @@ async fn main() -> anyhow::Result<()> {
             // Special case for if a file is supposed to be in the "config" directory. If we've
             // overriden the config directory we need to move the file outside of the normal
             // working directory.
-            let mrpack_path = Path::new(&mrfile.path).canonicalize()?;
+            let mrpack_path = Path::new(&mrfile.path);
             let container_path = if mrpack_path.starts_with("config")
                 && in_container_minecraft_config.config_dir.clone().is_some()
             {

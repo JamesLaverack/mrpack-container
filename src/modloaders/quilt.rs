@@ -162,7 +162,7 @@ pub async fn build_quilt_layer(
     let mut properties: HashMap<String, String> = HashMap::new();
     if let Some(jarpath) = &in_container_minecraft_config.minecraft_jar_path {
         properties.insert(
-            "loader.gameJarPath.server".to_string(),
+            "loader.gameJarPath".to_string(),
             jarpath
                 .to_str()
                 .ok_or(anyhow::anyhow!("Couldn't parse expected JAR string"))?
