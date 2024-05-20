@@ -2,10 +2,11 @@ use digest::Digest;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::*;
 
-use super::JavaConfig;
+use super::{InContainerMinecraftConfig, JavaConfig};
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -55,8 +56,7 @@ pub fn split_artefact(artefact: &str) -> anyhow::Result<(Vec<&str>, &str, &str)>
 
 pub async fn build_quilt_layer(
     oci_blob_dir: &Path,
-    minecraft_dir: &Path,
-    minecraft_jar_location: &Path,
+    in_container_minecraft_config: &InContainerMinecraftConfig,
     minecraft_version: &str,
     loader_version: &str,
 ) -> anyhow::Result<(JavaConfig, crate::oci_blob::Blob)> {
@@ -82,7 +82,7 @@ pub async fn build_quilt_layer(
         .json::<ServerLaunchProfile>()
         .await?;
 
-    let lib_dir = minecraft_dir.join("libraries");
+    let lib_dir = &in_container_minecraft_config.lib_dir;
 
     info!(
         blob_dir = oci_blob_dir.as_os_str().to_str().unwrap(),
@@ -159,18 +159,39 @@ pub async fn build_quilt_layer(
         "Created Quilt layer"
     );
 
+    let mut properties: HashMap<String, String> = HashMap::new();
+    if let Some(jarpath) = &in_container_minecraft_config.minecraft_jar_path {
+        properties.insert(
+            "loader.gameJarPath.server".to_string(),
+            jarpath
+                .to_str()
+                .ok_or(anyhow::anyhow!("Couldn't parse expected JAR string"))?
+                .to_string(),
+        );
+    }
+    if let Some(configpath) = &in_container_minecraft_config.config_dir {
+        properties.insert(
+            "loader.configPath".to_string(),
+            configpath
+                .to_str()
+                .ok_or(anyhow::anyhow!("Couldn't parse expected JAR string"))?
+                .to_string(),
+        );
+    }
+    if let Some(cachepath) = &in_container_minecraft_config.cache_dir {
+        properties.insert(
+            "loader.cacheDir".to_string(),
+            cachepath
+                .to_str()
+                .ok_or(anyhow::anyhow!("Couldn't parse expected JAR string"))?
+                .to_string(),
+        );
+    }
     Ok((
         JavaConfig {
             jars: jar_paths,
             main_class: server_profile.launcher_main_class,
-            properties: [(
-                "loader.gameJarPath.server".to_string(),
-                minecraft_jar_location
-                    .to_str()
-                    .ok_or(anyhow::anyhow!("Couldn't get expected JAR string"))?
-                    .to_string(),
-            )]
-            .into(),
+            properties,
         },
         l,
     ))

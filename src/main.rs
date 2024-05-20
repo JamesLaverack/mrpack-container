@@ -20,6 +20,7 @@ use modloaders::{fabric, quilt};
 use packfile::EnvType;
 
 use crate::arch::Architecture;
+use crate::modloaders::InContainerMinecraftConfig;
 use crate::oci_blob::{
     json::JsonBlobBuilder,
     layer::{FileInfo, TarLayerBuilder},
@@ -57,7 +58,7 @@ struct Args {
 async fn extract_overrides_to_layer<R: std::io::Read + std::io::Seek>(
     zipfile: &mut zip::ZipArchive<R>,
     oci_blob_dir: &Path,
-    container_dir: &Path,
+    in_container_minecraft_config: &InContainerMinecraftConfig,
     overrides: &str,
 ) -> anyhow::Result<Option<Blob>> {
     let mut olayer_builder = TarLayerBuilder::new(oci_blob_dir).await?;
@@ -72,7 +73,20 @@ async fn extract_overrides_to_layer<R: std::io::Read + std::io::Seek>(
                 // someone has a few hundred MB of JAR file in here.
                 let mut bytes = Vec::with_capacity(file.size() as usize);
                 std::io::copy(&mut file, &mut bytes)?;
-                let new_filepath = container_dir.join(path.strip_prefix(overrides)?);
+                let mrpack_path = path.strip_prefix(overrides)?;
+                let new_filepath = if mrpack_path.starts_with("config")
+                    && in_container_minecraft_config.config_dir.clone().is_some()
+                {
+                    let mut container_path =
+                        in_container_minecraft_config.config_dir.clone().unwrap();
+                    container_path.push(mrpack_path);
+                    container_path
+                } else {
+                    let mut container_path =
+                        in_container_minecraft_config.minecraft_working_dir.clone();
+                    container_path.push(mrpack_path);
+                    container_path
+                };
                 olayer_builder
                     .append_file(
                         &FileInfo {
@@ -552,13 +566,18 @@ async fn main() -> anyhow::Result<()> {
     // a configuration function back
     let java_config;
     let modloader_layer;
-    let minecraft_jar_location = Path::new("/usr/local/minecraft/server.jar");
+    let in_container_minecraft_config = modloaders::InContainerMinecraftConfig {
+        config_dir: Some(Path::new("/etc/minecraft").to_path_buf()),
+        cache_dir: Some(Path::new("/tmp/minecraft").to_path_buf()),
+        lib_dir: Path::new("/usr/local/minecraft/lib").to_path_buf(),
+        minecraft_jar_path: Some(Path::new("/usr/local/minecraft/server.jar").to_path_buf()),
+        minecraft_working_dir: Path::new("/var/minecraft").to_path_buf(),
+    };
     if let Some(fabric_version) = &index.dependencies.fabric_loader {
         info!(fabric_version = &fabric_version, "Using Fabric modloader");
         (java_config, modloader_layer) = fabric::build_fabric_layer(
             &oci_blob_dir,
-            Path::new("/usr/local/minecraft/lib/"),
-            &minecraft_jar_location,
+            &in_container_minecraft_config,
             &index.dependencies.minecraft,
             &fabric_version,
         )
@@ -567,8 +586,7 @@ async fn main() -> anyhow::Result<()> {
         info!(quilt_version = &quilt_version, "Using Quilt modloader");
         (java_config, modloader_layer) = quilt::build_quilt_layer(
             &oci_blob_dir,
-            Path::new("/usr/local/minecraft/lib/"),
-            &minecraft_jar_location,
+            &in_container_minecraft_config,
             &index.dependencies.minecraft,
             &quilt_version,
         )
@@ -587,7 +605,6 @@ async fn main() -> anyhow::Result<()> {
     ////////////////////////////////
     //// DOWNLAODS
     ////////////////////////////////
-    let minecraft_runtime_dir: PathBuf = "/var/minecraft".into();
     if let Some(files) = index.files {
         for mrfile in files {
             if let Some(env) = mrfile.env {
@@ -605,8 +622,23 @@ async fn main() -> anyhow::Result<()> {
             if mrfile.downloads.len() == 0 {
                 bail!("File had no provided download URLs")
             }
-            let mut container_path = minecraft_runtime_dir.clone();
-            container_path.push(mrfile.path);
+
+            // Special case for if a file is supposed to be in the "config" directory. If we've
+            // overriden the config directory we need to move the file outside of the normal
+            // working directory.
+            let mrpack_path = Path::new(&mrfile.path).canonicalize()?;
+            let container_path = if mrpack_path.starts_with("config")
+                && in_container_minecraft_config.config_dir.clone().is_some()
+            {
+                let mut container_path = in_container_minecraft_config.config_dir.clone().unwrap();
+                container_path.push(mrfile.path);
+                container_path
+            } else {
+                let mut container_path =
+                    in_container_minecraft_config.minecraft_working_dir.clone();
+                container_path.push(mrfile.path);
+                container_path
+            };
 
             let u = mrfile.downloads.get(0).unwrap();
             let mut file_layer_builder = TarLayerBuilder::new(&oci_blob_dir).await?;
@@ -657,7 +689,7 @@ async fn main() -> anyhow::Result<()> {
     extract_overrides_to_layer(
         &mut zipfile,
         &oci_blob_dir,
-        &Path::new("/var/minecraft"),
+        &in_container_minecraft_config,
         "overrides",
     )
     .await?
@@ -666,7 +698,7 @@ async fn main() -> anyhow::Result<()> {
     extract_overrides_to_layer(
         &mut zipfile,
         &oci_blob_dir,
-        &Path::new("/var/minecraft"),
+        &in_container_minecraft_config,
         "server-overrides",
     )
     .await?
@@ -872,7 +904,13 @@ async fn main() -> anyhow::Result<()> {
     warn!(
         url = manifest.downloads.server.unwrap().url.to_string(),
         minecraft_version = index.dependencies.minecraft,
-        expected_path_in_container = minecraft_jar_location.as_os_str().to_str().unwrap(),
+        // TODO don't just spam .unwrap() here
+        expected_path_in_container = &in_container_minecraft_config
+            .minecraft_jar_path
+            .unwrap()
+            .as_os_str()
+            .to_str()
+            .unwrap(),
         "You still need a Mojang JAR file, you can find the link in this log message"
     );
 
