@@ -759,7 +759,6 @@ async fn main() -> anyhow::Result<()> {
         architecture: arch.oci(),
         os: oci_distribution::config::Os::Linux,
         config: Some(oci_distribution::config::Config {
-            // TODO force non-root
             user: Some("1000:1000".to_string()),
             // The default Minecraft server port
             exposed_ports: Some(HashSet::from(["25565/tcp".to_string()])),
@@ -791,6 +790,10 @@ async fn main() -> anyhow::Result<()> {
     info!(
         path = ?config_blob.path,
         digest = config_blob.digest(),
+        entrypoint = config_file.config.as_ref().map(|c| c.entrypoint.as_ref()).flatten().map(|v| v.join(" ")).unwrap_or("[]".to_string()),
+        cmd = config_file.config.as_ref().map(|c| c.cmd.as_ref()).flatten().map(|v| v.join(" ")).unwrap_or("[]".to_string()),
+        working_dir = config_file.config.as_ref().map(|c| c.working_dir.as_ref()).flatten().unwrap_or(&"<none set>".to_string()),
+        user = config_file.config.as_ref().map(|c| c.user.as_ref()).flatten().unwrap_or(&"<not set>".to_string()),
         "Wrote Container Config file"
     );
 
