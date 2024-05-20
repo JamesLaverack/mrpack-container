@@ -23,7 +23,7 @@ pub struct VersionListEntry {
     pub sha1: [u8; 20],
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct VersionManifest {
     pub id: String,
@@ -31,19 +31,19 @@ pub struct VersionManifest {
     pub downloads: Downloads,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct JavaVersion {
     pub major_version: u64,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Downloads {
     pub server: Option<Download>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Download {
     #[serde(with = "hex")]

@@ -17,6 +17,12 @@ pub struct InContainerMinecraftConfig {
     pub minecraft_working_dir: PathBuf,
 }
 
+impl InContainerMinecraftConfig {
+    pub fn eula_path(&self) -> PathBuf {
+        self.minecraft_working_dir.clone().join("eula.txt")
+    }
+}
+
 pub struct JavaConfig {
     pub jars: Vec<PathBuf>,
     pub main_class: String,

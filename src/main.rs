@@ -874,8 +874,8 @@ async fn main() -> anyhow::Result<()> {
         "Wrote OCI layout file"
     );
 
-    warn!(
-        url = manifest.downloads.server.unwrap().url.to_string(),
+    info!(
+        jar_download_url = manifest.downloads.clone().server.unwrap().url.to_string(),
         minecraft_version = index.dependencies.minecraft,
         // TODO don't just spam .unwrap() here
         expected_path_in_container = &in_container_minecraft_config
@@ -883,7 +883,18 @@ async fn main() -> anyhow::Result<()> {
             .as_os_str()
             .to_str()
             .unwrap(),
-        "You still need a Mojang JAR file, you can find the link in this log message"
+        sha1_checksum = hex::encode_upper(manifest.downloads.clone().server.unwrap().sha1),
+        "You still need a Mojang JAR file"
+    );
+    info!(
+        read_the_eula_url = "https://www.minecraft.net/en-us/eula",
+        expected_path_in_container = &in_container_minecraft_config
+            .eula_path()
+            .as_os_str()
+            .to_str()
+            .unwrap(),
+        file_contents_to_accept = "eula=true",
+        "You still need a file to accept the Minecraft EULA"
     );
 
     info!("done!");
