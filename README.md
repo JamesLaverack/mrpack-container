@@ -20,7 +20,8 @@ The resulting containers are:
 
 The only missing dependency is the Mojang server.jar itself, which is non-redistributable.
 You can either add another container layer ontop of one generated here, or you can download it and mount it in at runtime.
-Generally speaking, you should place it at `/var/minecraft/server.jar` inside the container.
+Generally speaking, you should place it at `/usr/local/minecraft/server.jar` inside the container.
+If possible, you should make the Mojang `server.jar` read-only inside the container.
 
 ## Warnings
 
@@ -90,6 +91,12 @@ Will run the server and make it available on `localhost:25565`.
 
 ## Container Structure
 
+In general:
+- `/bin`, `/lib`, `/usr/local/java`, and `/usr/share/doc` are used for system-level dependencies, i.e., Java.
+- `/usr/local/minecraft` is used for immutable files to do with the Minecraft install.
+- `/var/minecraft` is used for things that are mostly expected to be mutable at runtime.
+
+In detail:
 - `/bin` with a simlink for `/bin/java` (to `/usr/local/java/bin/java`)
 - `/lib` with the musl libc library
 - `/usr/local/java` with the JVM
@@ -104,6 +111,7 @@ The container is intended to be run with the main process running as uid `1000` 
 - `/var/miencraft/libraries`
 
 This is an intentional security choice, in order to make an attacker with remote code execution on your Minecraft server have as hard of a job as possible mantaining persistence.
+
 
 ## Layers
 

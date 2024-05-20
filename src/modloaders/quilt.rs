@@ -162,7 +162,11 @@ pub async fn build_quilt_layer(
         JavaConfig {
             jars: jar_paths,
             main_class: server_profile.launcher_main_class,
-            properties: [].into(),
+            properties: [(
+                "loader.gameJarPath.server".to_string(),
+                "/usr/local/minecraft/server.jar".to_string(),
+            )]
+                .into(),
         },
         l,
     ))

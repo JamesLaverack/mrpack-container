@@ -41,7 +41,7 @@ jobs:
             --detach \
             --publish 25565:25565 \
             --volume /tmp/world:/var/minecraft/world \
-            --volume "$(pwd)"/server.jar:/var/minecraft/server.jar:ro \
+            --volume "$(pwd)"/server.jar:/usr/local/minecraft/server.jar:ro \
             --volume "$(pwd)"/eula.txt:/var/minecraft/eula.txt:ro \
             "$container_id" > running_container_id
       - name: Verify Container is hosting a Minecraft Server 
