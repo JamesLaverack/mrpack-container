@@ -44,8 +44,6 @@ pub enum LayerBuilderError {
         actual: u64,
         path: PathBuf,
     },
-    #[error("File cannot be empty")]
-    EmptyFile { path: PathBuf },
     #[error("Path '{path}' for tar entry was invalid")]
     InvalidPath { path: PathBuf, source: io::Error },
     #[error("Path '{path}' was not an absolute path")]

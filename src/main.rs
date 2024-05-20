@@ -96,6 +96,7 @@ async fn extract_overrides_to_layer<R: std::io::Read + std::io::Seek>(
                     .await?;
                 info!(
                     path = ?new_filepath,
+                    size = file.size(),
                     overrides = overrides,
                     writable = if writable { "yes" } else { "no" },
                     "Unpacked overrides file"

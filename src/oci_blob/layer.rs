@@ -130,11 +130,6 @@ impl TarLayerBuilder {
         file_size: u64,
         bytes: &mut R,
     ) -> Result<(), super::LayerBuilderError> {
-        if file_size == 0 {
-            return Err(super::LayerBuilderError::EmptyFile {
-                path: file_info.path.clone(),
-            });
-        }
         let path = file_info.path.strip_prefix("/").map_err(|source| {
             super::LayerBuilderError::RelativePath {
                 path: file_info.path.clone(),
