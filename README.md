@@ -53,7 +53,7 @@ You need a Modrinth format modpack file (i.e., a `.mrpack` file).
 You can find these on [Modrinth](https://modrinth.com/modpacks), or use [packwiz](https://packwiz.infra.link/) to convert other formats of modpack to the Modrinth format.
 
 ```bash
-mrpack-container my-modpack.mrpack ./output
+mrpack-container --output ./output my-modpack.mrpack
 ```
 
 The output is in OCI format in the given directory, but not compressed. You can use `tar` to compress it into a single file: `tar cf - -C ./output .`.
@@ -105,13 +105,14 @@ In detail:
 
 The files and overrides in the Modrinth file are unpacked into `/var/minecraft`.
 Permissions are set as `0755` or `0644`, and most files are owned by root.
+Some files, depending on their name, are set as `0777` or `0666` instead, allowing the Minecraft process to write to them.
+
 The container is intended to be run with the main process running as uid `1000` and gid `1000`, therefore a number of directories are owned by that user instead:
 - `/var/minecraft`
 - `/var/minecraft/config`
 - `/var/miencraft/libraries`
 
 This is an intentional security choice, in order to make an attacker with remote code execution on your Minecraft server have as hard of a job as possible mantaining persistence.
-
 
 ## Layers
 

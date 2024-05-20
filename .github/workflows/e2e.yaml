@@ -29,7 +29,7 @@ jobs:
       - name: Install mrpack-container
         run: chmod +x /usr/local/bin/mrpack-container
       - name: Build Container
-        run: mrpack-container "tests/mrpacks/${{ matrix.mrpackfile }}" ./output 
+        run: mrpack-container --output ./output "tests/mrpacks/${{ matrix.mrpackfile }}" 
       - name: Run Container
         run: |
           wget --no-verbose "https://piston-data.mojang.com/v1/objects/84194a2f286ef7c14ed7ce0090dba59902951553/server.jar"

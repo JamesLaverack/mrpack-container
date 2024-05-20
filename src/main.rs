@@ -42,8 +42,8 @@ struct Args {
     #[arg(help = "Path to the Modrinth Modpack file")]
     mr_pack_file: String,
 
-    #[arg(help = "Output directory")]
-    output_dir: String,
+    #[arg(long, short, help = "Output directory")]
+    output: String,
 
     #[arg(long, help = "Container Architecture", default_value = "amd64")]
     arch: String,
@@ -168,7 +168,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Create the output directories
-    let oci_archive_dir: PathBuf = args.output_dir.into();
+    let oci_archive_dir: PathBuf = args.output.into();
     if oci_archive_dir.exists() {
         warn!(
             path = ?oci_archive_dir,
