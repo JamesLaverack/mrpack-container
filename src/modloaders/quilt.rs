@@ -166,7 +166,7 @@ pub async fn build_quilt_layer(
                 "loader.gameJarPath.server".to_string(),
                 "/usr/local/minecraft/server.jar".to_string(),
             )]
-                .into(),
+            .into(),
         },
         l,
     ))
