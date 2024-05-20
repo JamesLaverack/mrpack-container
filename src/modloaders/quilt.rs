@@ -56,6 +56,7 @@ pub fn split_artefact(artefact: &str) -> anyhow::Result<(Vec<&str>, &str, &str)>
 pub async fn build_quilt_layer(
     oci_blob_dir: &Path,
     minecraft_dir: &Path,
+    minecraft_jar_location: &Path,
     minecraft_version: &str,
     loader_version: &str,
 ) -> anyhow::Result<(JavaConfig, crate::oci_blob::Blob)> {
@@ -164,7 +165,10 @@ pub async fn build_quilt_layer(
             main_class: server_profile.launcher_main_class,
             properties: [(
                 "loader.gameJarPath.server".to_string(),
-                "/usr/local/minecraft/server.jar".to_string(),
+                minecraft_jar_location
+                    .to_str()
+                    .ok_or(anyhow::anyhow!("Couldn't get expected JAR string"))?
+                    .to_string(),
             )]
             .into(),
         },

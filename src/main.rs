@@ -552,11 +552,13 @@ async fn main() -> anyhow::Result<()> {
     // a configuration function back
     let java_config;
     let modloader_layer;
+    let minecraft_jar_location = Path::new("/usr/local/minecraft/server.jar");
     if let Some(fabric_version) = &index.dependencies.fabric_loader {
         info!(fabric_version = &fabric_version, "Using Fabric modloader");
         (java_config, modloader_layer) = fabric::build_fabric_layer(
             &oci_blob_dir,
             Path::new("/usr/local/minecraft/lib/"),
+            &minecraft_jar_location,
             &index.dependencies.minecraft,
             &fabric_version,
         )
@@ -566,6 +568,7 @@ async fn main() -> anyhow::Result<()> {
         (java_config, modloader_layer) = quilt::build_quilt_layer(
             &oci_blob_dir,
             Path::new("/usr/local/minecraft/lib/"),
+            &minecraft_jar_location,
             &index.dependencies.minecraft,
             &quilt_version,
         )
@@ -866,7 +869,7 @@ async fn main() -> anyhow::Result<()> {
     warn!(
         url = manifest.downloads.server.unwrap().url.to_string(),
         minecraft_version = index.dependencies.minecraft,
-        expected_path_in_container = "/var/minecraft/server.jar",
+        expected_path_in_container = minecraft_jar_location.as_os_str().to_str().unwrap(),
         "You still need a Mojang JAR file, you can find the link in this log message"
     );
 
