@@ -74,19 +74,9 @@ async fn extract_overrides_to_layer<R: std::io::Read + std::io::Seek>(
                 let mut bytes = Vec::with_capacity(file.size() as usize);
                 std::io::copy(&mut file, &mut bytes)?;
                 let mrpack_path = path.strip_prefix(overrides)?;
-                let new_filepath = if mrpack_path.starts_with("config")
-                    && in_container_minecraft_config.config_dir.clone().is_some()
-                {
-                    let mut container_path =
-                        in_container_minecraft_config.config_dir.clone().unwrap();
-                    container_path.push(mrpack_path);
-                    container_path
-                } else {
-                    let mut container_path =
-                        in_container_minecraft_config.minecraft_working_dir.clone();
-                    container_path.push(mrpack_path);
-                    container_path
-                };
+                let mut new_filepath =
+                    in_container_minecraft_config.minecraft_working_dir.clone();
+                new_filepath.push(mrpack_path);
                 olayer_builder
                     .append_file(
                         &FileInfo {
@@ -567,10 +557,8 @@ async fn main() -> anyhow::Result<()> {
     let java_config;
     let modloader_layer;
     let in_container_minecraft_config = modloaders::InContainerMinecraftConfig {
-        config_dir: Some(Path::new("/etc/minecraft").to_path_buf()),
-        cache_dir: Some(Path::new("/tmp/minecraft").to_path_buf()),
         lib_dir: Path::new("/usr/local/minecraft/lib").to_path_buf(),
-        minecraft_jar_path: Some(Path::new("/usr/local/minecraft/server.jar").to_path_buf()),
+        minecraft_jar_path: Path::new("/usr/local/minecraft/server.jar").to_path_buf(),
         minecraft_working_dir: Path::new("/var/minecraft").to_path_buf(),
     };
     if let Some(fabric_version) = &index.dependencies.fabric_loader {
@@ -623,22 +611,8 @@ async fn main() -> anyhow::Result<()> {
                 bail!("File had no provided download URLs")
             }
 
-            // Special case for if a file is supposed to be in the "config" directory. If we've
-            // overriden the config directory we need to move the file outside of the normal
-            // working directory.
-            let mrpack_path = Path::new(&mrfile.path);
-            let container_path = if mrpack_path.starts_with("config")
-                && in_container_minecraft_config.config_dir.clone().is_some()
-            {
-                let mut container_path = in_container_minecraft_config.config_dir.clone().unwrap();
-                container_path.push(mrfile.path);
-                container_path
-            } else {
-                let mut container_path =
-                    in_container_minecraft_config.minecraft_working_dir.clone();
-                container_path.push(mrfile.path);
-                container_path
-            };
+            let mut container_path = in_container_minecraft_config.minecraft_working_dir.clone();
+            container_path.push(mrfile.path);
 
             let u = mrfile.downloads.get(0).unwrap();
             let mut file_layer_builder = TarLayerBuilder::new(&oci_blob_dir).await?;
@@ -907,7 +881,6 @@ async fn main() -> anyhow::Result<()> {
         // TODO don't just spam .unwrap() here
         expected_path_in_container = &in_container_minecraft_config
             .minecraft_jar_path
-            .unwrap()
             .as_os_str()
             .to_str()
             .unwrap(),

@@ -160,33 +160,15 @@ pub async fn build_quilt_layer(
     );
 
     let mut properties: HashMap<String, String> = HashMap::new();
-    if let Some(jarpath) = &in_container_minecraft_config.minecraft_jar_path {
-        properties.insert(
-            "loader.gameJarPath".to_string(),
-            jarpath
-                .to_str()
-                .ok_or(anyhow::anyhow!("Couldn't parse expected JAR string"))?
-                .to_string(),
-        );
-    }
-    if let Some(configpath) = &in_container_minecraft_config.config_dir {
-        properties.insert(
-            "loader.configPath".to_string(),
-            configpath
-                .to_str()
-                .ok_or(anyhow::anyhow!("Couldn't parse expected JAR string"))?
-                .to_string(),
-        );
-    }
-    if let Some(cachepath) = &in_container_minecraft_config.cache_dir {
-        properties.insert(
-            "loader.cacheDir".to_string(),
-            cachepath
-                .to_str()
-                .ok_or(anyhow::anyhow!("Couldn't parse expected JAR string"))?
-                .to_string(),
-        );
-    }
+    properties.insert(
+        "loader.gameJarPath".to_string(),
+        in_container_minecraft_config
+            .minecraft_jar_path
+            .to_str()
+            .ok_or(anyhow::anyhow!("Couldn't parse expected JAR string"))?
+            .to_string(),
+    );
+
     Ok((
         JavaConfig {
             jars: jar_paths,

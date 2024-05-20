@@ -1,3 +1,4 @@
+use anyhow::bail;
 use digest::Digest;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -160,33 +161,17 @@ pub async fn build_fabric_layer(
     );
 
     let mut properties: HashMap<String, String> = HashMap::new();
-    if let Some(jarpath) = &in_container_minecraft_config.minecraft_jar_path {
-        properties.insert(
-            "fabric.gameJarPath.server".to_string(),
-            jarpath
-                .to_str()
-                .ok_or(anyhow::anyhow!("Couldn't parse expected JAR string"))?
-                .to_string(),
-        );
-    }
-    if let Some(configpath) = &in_container_minecraft_config.config_dir {
-        properties.insert(
-            "fabric.configPath".to_string(),
-            configpath
-                .to_str()
-                .ok_or(anyhow::anyhow!("Couldn't parse expected JAR string"))?
-                .to_string(),
-        );
-    }
-    if let Some(cachepath) = &in_container_minecraft_config.cache_dir {
-        properties.insert(
-            "fabric.cacheDir".to_string(),
-            cachepath
-                .to_str()
-                .ok_or(anyhow::anyhow!("Couldn't parse expected JAR string"))?
-                .to_string(),
-        );
-    }
+    
+    debug!("Disabling Fabric file logging by setting the log file to /dev/null");
+    properties.insert("fabric.log.file".to_string(), "/dev/null".to_string());
+
+    properties.insert(
+        "fabric.gameJarPath.server".to_string(),
+        in_container_minecraft_config.minecraft_jar_path
+            .to_str()
+            .ok_or(anyhow::anyhow!("Couldn't parse expected JAR string"))?
+            .to_string(),
+    );
 
     Ok((
         JavaConfig {
