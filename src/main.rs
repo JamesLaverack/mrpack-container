@@ -74,8 +74,7 @@ async fn extract_overrides_to_layer<R: std::io::Read + std::io::Seek>(
                 let mut bytes = Vec::with_capacity(file.size() as usize);
                 std::io::copy(&mut file, &mut bytes)?;
                 let mrpack_path = path.strip_prefix(overrides)?;
-                let mut new_filepath =
-                    in_container_minecraft_config.minecraft_working_dir.clone();
+                let mut new_filepath = in_container_minecraft_config.minecraft_working_dir.clone();
                 new_filepath.push(mrpack_path);
                 olayer_builder
                     .append_file(
