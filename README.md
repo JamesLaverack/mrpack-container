@@ -1,27 +1,17 @@
 # mrpack-container
 
-A command line utility that turns a Modrinth `.mrpack` file into a ready-to-use container image.
+Turn Modrinth modpack (`.mrpack`) files directly into ready-to-use container images.
 
 `mrpack-container` is:
 - Fast
-- Lightweight
-- Has minimal dependencies
-- Pure Rust
 - Does not require a JVM
 - Does not require a container runtime
-- Deterministic, produces the same output each time (-ish) 
-- Direct streaming: no temporary files or scratch space required
+- Pure Rust
 
 The resulting containers are:
 - Small, usually a few hundred MB depending on mods installed
 - Fast to start up, with no downloads on bootup required
 - Security focused, running as non-root with the majority of the filesystem immutable
-- Immutable, with (almost) all dependencies packaged they will not change over time  
-
-The only missing dependency is the Mojang server.jar itself, which is non-redistributable.
-You can either add another container layer ontop of one generated here, or you can download it and mount it in at runtime.
-Generally speaking, you should place it at `/usr/local/minecraft/server.jar` inside the container.
-If possible, you should make the Mojang `server.jar` read-only inside the container.
 
 ## Warnings
 
@@ -31,7 +21,7 @@ NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR 
 
 **This is pre-Alpha and is under construction.**
 In particular, the code quality is awful because this is thrown together.
-Many things are not yet supported. For example, only Quilt works at the moment.
+Many things are not yet supported.
 
 ## Installing
 
@@ -63,10 +53,15 @@ You can load and execute the produced image directly with a container runtime.
 tar cf - -C ./output/ . | podman load
 ```
 
+or use [Skopeo](https://github.com/containers/skopeo) to upload it directly to a container runtime:
+```bash
+skopeo copy --format=oci oci:./output docker://registry.example.com/my-modpack:latest
+```
+
 ## Using Images
 
 You will need to mount:
-- A Minecraft server var, usually at `/var/minecraft/sever.jar`
+- A Minecraft server var, usually at `/usr/lib/minecraft/sever.jar`
 - A file to accept the Minecraft [EULA](https://www.minecraft.net/en-us/eula), usually a text file containing `eula=true` at `/var/minecraft/eula.txt`.
 
 And you will probably **want** to mount:
@@ -83,7 +78,7 @@ mkdir world
 podman run \
   -p 25565:25565 \
   -v "$(pwd)"/world:/var/minecraft/world \
-  -v "$(pwd)"/server.jar:/var/minecraft/server.jar:ro \
+  -v "$(pwd)"/server.jar:/usr/lib/minecraft/server.jar:ro \
   -v "$(pwd)"/eula.txt:/var/minecraft/eula.txt:ro \
   <container_id>
 ```
@@ -112,8 +107,6 @@ The container is intended to be run with the main process running as uid `1000` 
 - `/var/minecraft/config`
 - `/var/miencraft/libraries`
 
-This is an intentional security choice, in order to make an attacker with remote code execution on your Minecraft server have as hard of a job as possible mantaining persistence.
-
 ## Layers
 
 The container makes extensive use of layering:
@@ -125,3 +118,4 @@ The container makes extensive use of layering:
 - Overrides from the mrpack file
 - Server overrides from the mrpack file
 - Permissions changes
+
