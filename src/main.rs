@@ -81,11 +81,7 @@ async fn extract_overrides_to_layer<R: std::io::Read + std::io::Seek>(
                     .append_file(
                         &FileInfo {
                             path: new_filepath.clone(),
-                            mode: if writable {
-                                0o0666
-                            } else {
-                                0o0644
-                            },
+                            mode: if writable { 0o0666 } else { 0o0644 },
                             uid: 0,
                             gid: 0,
                             last_modified: 0,
