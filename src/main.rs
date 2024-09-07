@@ -202,7 +202,7 @@ async fn main() -> anyhow::Result<()> {
     // TODO verify the checksum of this DEB file
     let musl_dep = deb::Package {
         name: "musl".to_string(),
-        version: "1.2.5-1".to_string(),
+        version: "1.2.5-1.1".to_string(),
         arch,
     };
     info!(
