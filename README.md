@@ -61,7 +61,7 @@ skopeo copy --format=oci oci:./output docker://registry.example.com/my-modpack:l
 ## Using Images
 
 You will need to mount:
-- A Minecraft server var, usually at `/usr/lib/minecraft/sever.jar`
+- A Minecraft server JAR from Mojang, of the correct Minecraft version for your mods and loader, usually mounted at `/usr/lib/minecraft/sever.jar`
 - A file to accept the Minecraft [EULA](https://www.minecraft.net/en-us/eula), usually a text file containing `eula=true` at `/var/minecraft/eula.txt`.
 
 And you will probably **want** to mount:
