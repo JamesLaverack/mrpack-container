@@ -3,10 +3,10 @@
 Turn Modrinth modpack (`.mrpack`) files directly into ready-to-use container images.
 
 `mrpack-container` is:
-- Fast
+- Fast to run
 - Does not require a JVM
 - Does not require a container runtime
-- Pure Rust
+- Does not need to run on the same architecture you are building an image for
 
 The resulting containers are:
 - Small, usually a few hundred MB depending on mods installed
@@ -119,3 +119,7 @@ The container makes extensive use of layering:
 - Server overrides from the mrpack file
 - Permissions changes
 
+## Development
+
+This project is written in pure [Rust](https://www.rust-lang.org/), and uses [Cargo](https://doc.rust-lang.org/cargo/) for all building.
+[Tokio](https://tokio.rs/) is used as the async runtime of choice. 
