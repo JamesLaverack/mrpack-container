@@ -93,7 +93,7 @@ In general:
 
 In detail:
 - `/bin` with a simlink for `/bin/java` (to `/usr/local/java/bin/java`)
-- `/lib` with the musl libc library
+- `/lib` with the musl Libc library
 - `/usr/local/java` with the JVM
 - `/usr/local/minecraft/lib` with modloader libraries
 - `/usr/share/doc/musl` with copyright information for musl
