@@ -6,6 +6,7 @@ pub mod quilt;
 
 // InContainerMinecraftConfig instructs the mod loader on what the expected configuration of the
 // Minecraft container to be. All paths in here are for *inside the container*.
+#[derive(Clone, Debug)]
 pub struct InContainerMinecraftConfig {
     // The lib directory is where the library JARs for the modloader itself should be placed
     pub lib_dir: PathBuf,
@@ -23,6 +24,7 @@ impl InContainerMinecraftConfig {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct JavaConfig {
     pub jars: Vec<PathBuf>,
     pub main_class: String,

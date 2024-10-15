@@ -15,7 +15,7 @@ pub struct Index {
     pub dependencies: Dependencies,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "kebab-case")]
 pub struct Dependencies {
     pub minecraft: String,

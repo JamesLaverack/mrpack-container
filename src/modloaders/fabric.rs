@@ -122,8 +122,8 @@ pub async fn build_fabric_layer(
 
         let digest: [u8; 32] = fabric_layer
             .append_file_from_url(
+                &jar_path,
                 crate::oci_blob::layer::FileInfo {
-                    path: jar_path.clone(),
                     mode: 0o644,
                     uid: 0,
                     gid: 0,

@@ -1,23 +1,24 @@
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::{collections::HashMap, fs};
-use std::{collections::HashSet, fs::File};
-
 use anyhow::{bail, Context};
 use async_compression::tokio::bufread::{GzipDecoder, XzDecoder};
+use async_zip::tokio::read::fs::ZipFileReader;
 use clap::Parser;
 use futures::io::ErrorKind;
 use futures::prelude::*;
+use modloaders::{fabric, quilt};
 use oci_distribution::{config::ConfigFile, manifest::OciDescriptor};
+use packfile::EnvType;
 use sha2::{Digest, Sha512};
+use std::collections::HashMap;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::{collections::HashSet, fs::File};
 use tar::EntryType;
 use tokio::io::{AsyncReadExt, BufReader};
+use tokio::task::JoinSet;
+use tokio_util::compat::FuturesAsyncReadCompatExt;
 #[allow(unused_imports)]
 use tracing::{debug, error, info, trace, warn};
 use tracing_subscriber;
-
-use modloaders::{fabric, quilt};
-use packfile::EnvType;
 
 use crate::arch::Architecture;
 use crate::modloaders::{InContainerMinecraftConfig, JavaConfig};
@@ -74,64 +75,112 @@ struct Args {
     debug: bool,
 }
 
-async fn extract_overrides_to_layer<R: std::io::Read + std::io::Seek>(
-    zipfile: &mut zip::ZipArchive<R>,
-    oci_blob_dir: &Path,
+async fn load_index_file(mrpack_file: &ZipFileReader) -> anyhow::Result<packfile::Index> {
+    // Search through for the modrinth index file. This doesn't scan the whole file, just the ZIP
+    // file's index which is stored at the end. Then open a reader to that file based on the index number.
+    let mut index_file_reader = mrpack_file
+        .reader_with_entry(
+            match mrpack_file.file().entries().iter().position(|f| {
+                f.filename()
+                    .as_str()
+                    .map(|n| n == "modrinth.index.json")
+                    .unwrap_or_default()
+            }) {
+                Some(file) => file,
+                None => {
+                    anyhow::bail!("Failed to find modrinth.index.json file in .mrpack archive");
+                }
+            },
+        )
+        .await?;
+    // Read the entire index file into memory. It *should* be a relatively short JSON text file.
+    let mut index_bytes =
+        Vec::with_capacity(index_file_reader.entry().uncompressed_size() as usize);
+    index_file_reader
+        .read_to_end_checked(&mut index_bytes)
+        .await?;
+
+    Ok(serde_json::from_slice(&index_bytes)?)
+}
+
+async fn extract_overrides_to_layer<P: AsRef<Path>>(
+    mrpack_file: &ZipFileReader,
+    oci_blob_dir: P,
     in_container_minecraft_config: &InContainerMinecraftConfig,
     overrides: &str,
 ) -> anyhow::Result<Option<Blob>> {
-    let mut olayer_builder = TarLayerBuilder::new(oci_blob_dir).await?;
-    let mut found_overrides = false;
-    for i in 0..zipfile.len() {
-        let mut file = zipfile.by_index(i)?;
-        if let Some(path) = file.enclosed_name().map(|e| e.to_path_buf()) {
-            if path.starts_with(overrides) && file.is_file() {
-                found_overrides = true;
-                // This code is actually awful. We're reading the entire override file into
-                // memory. Then streaming it all out. Fine for a few KB of config file. Not fine if
-                // someone has a few hundred MB of JAR file in here.
-                let mut bytes = Vec::with_capacity(file.size() as usize);
-                std::io::copy(&mut file, &mut bytes)?;
-                let mrpack_path = path.strip_prefix(overrides)?;
-                let writable = guess_is_writable(&mrpack_path);
-                let mut new_filepath = in_container_minecraft_config.minecraft_working_dir.clone();
-                new_filepath.push(mrpack_path);
-                olayer_builder
-                    .append_file(
-                        &FileInfo {
-                            path: new_filepath.clone(),
-                            mode: if writable { 0o0666 } else { 0o0644 },
-                            uid: 0,
-                            gid: 0,
-                            last_modified: 0,
-                        },
-                        file.size(),
-                        &mut bytes.as_slice(),
-                    )
-                    .await?;
-                info!(
-                    path = ?new_filepath,
-                    size = file.size(),
-                    overrides = overrides,
-                    writable = if writable { "yes" } else { "no" },
-                    "Unpacked overrides file"
-                );
-            }
-        }
+    // Find the list of applicable overrides by looking at the filenames
+    let mut entries = mrpack_file
+        .file()
+        .entries()
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            e.filename()
+                .as_str()
+                .map(|f| f.starts_with(overrides))
+                .unwrap_or_default()
+        })
+        .collect::<Vec<(usize, &async_zip::StoredZipEntry)>>();
+
+    // Sort the list by filename for stability
+    entries.sort_by_key(|(_, e)| e.filename().as_str().unwrap_or_default());
+
+    // If none, exit early
+    if entries.len() == 0 {
+        return Ok(None);
     }
-    Ok(if found_overrides {
-        let layer = olayer_builder.finalise().await?;
+
+    // Otherwise, build a layer for them
+    let mut olayer_builder = TarLayerBuilder::new(oci_blob_dir).await?;
+
+    // Loop over the entries in order and write them into the layer.
+    for (i, e) in &entries {
+        // In theory, it's possible to read from the zipfile entries in parallel. But that doesn't
+        // help us get any faster because we can't *write* them in parallel. (Not without some
+        // filesystem handle shenanigans anyway.)
+        let relative_path = Path::new(e.filename().as_str()?).strip_prefix(overrides)?;
+        let writable = guess_is_writable(&relative_path);
+        let in_container_filepath = in_container_minecraft_config
+            .minecraft_working_dir
+            .join(relative_path);
+        let mut reader = BufReader::new(mrpack_file.reader_without_entry(*i).await?.compat());
+
+        olayer_builder
+            .append_file(
+                &in_container_filepath,
+                &FileInfo {
+                    mode: if writable { 0o0666 } else { 0o0644 },
+                    uid: 0,
+                    gid: 0,
+                    last_modified: 0,
+                },
+                e.uncompressed_size(),
+                &mut reader,
+            )
+            .await?;
         info!(
-            path = ?&layer.path,
-            digest = &layer.digest(),
+            path = &in_container_filepath
+                .as_os_str()
+                .to_str()
+                .unwrap_or_default(),
+            size = e.uncompressed_size(),
             overrides = overrides,
-            "Created Overrides Layer"
+            writable = if writable { "yes" } else { "no" },
+            "Unpacked overrides file"
         );
-        Some(layer)
-    } else {
-        olayer_builder.cancel().await?;
-        None
-    })
+    }
+
+    // Finalise the layer
+    let layer = olayer_builder.finalise().await?;
+    info!(
+        path = ?&layer.path,
+        digest = &layer.digest(),
+        overrides = overrides,
+        num_files = entries.len(),
+        "Created Overrides Layer"
+    );
+    Ok(Some(layer))
 }
 
 // Some files and directories are expected to be writable by various mods. However, the MRPACK
@@ -143,7 +192,6 @@ fn guess_is_writable(path: &Path) -> bool {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // TODO break this function out so it's not hundreds of lines long
     let args = Args::parse();
     let subscriber = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -160,24 +208,14 @@ async fn main() -> anyhow::Result<()> {
         None => bail!("Architecture not supported"),
     };
 
-    info!(
-        arch = ?arch,
-        "Running mrpack-container");
 
-    // Load the pack file and extract it
+    // Load the pack file
     let path = Path::new(&args.mr_pack_file);
     if !path.exists() {
-        anyhow::bail!("File not found");
+        anyhow::bail!("Pack file not found");
     }
-    // TODO use Async reading on this file, instead of sync code
-    let mut zipfile = zip::ZipArchive::new(File::open(path)?)?;
-    let index_file = match zipfile.by_name("modrinth.index.json") {
-        Ok(file) => file,
-        Err(_) => {
-            anyhow::bail!("Failed to find modrinth.index.json file in .mrpack archive");
-        }
-    };
-    let index: packfile::Index = serde_json::from_reader(index_file)?;
+    let mrpack_file = ZipFileReader::new(path).await?;
+    let index = load_index_file(&mrpack_file).await?;
     info!(
         path = "file://".to_owned() + &path.as_os_str().to_str().unwrap(),
         name = index.name,
@@ -186,14 +224,14 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Create the output directories
-    let oci_archive_dir: PathBuf = args.output.into();
+    let oci_archive_dir: &Path = args.output.as_ref();
     if oci_archive_dir.exists() {
         warn!(
             path = ?oci_archive_dir,
             "Output directory already exists, some files may be overwritten.")
     }
     let oci_blob_dir = oci_archive_dir.join("blobs").join("sha256");
-    fs::create_dir_all(&oci_blob_dir)?;
+    tokio::fs::create_dir_all(&oci_blob_dir).await?;
     info!(
         path = oci_archive_dir.as_os_str().to_str().unwrap(),
         blob_dir = oci_blob_dir.as_os_str().to_str().unwrap(),
@@ -219,60 +257,72 @@ async fn main() -> anyhow::Result<()> {
         minecraft_working_dir: Path::new("/var/minecraft").to_path_buf(),
     };
 
-    let mut layers: Vec<BuiltLayer> = vec![];
+    // Build layers in parallel
+    let mut join_set = JoinSet::new();
 
-    layers.push(install_musl_layer(arch, &oci_blob_dir).await?);
-    layers.push(install_jre(arch, &oci_blob_dir, &java_version).await?);
-    layers.push(
-        install_modloader(
-            &oci_blob_dir,
-            &in_container_minecraft_config,
-            &index.dependencies,
-        )
-        .await?,
-    );
+    // There's a load of cloning going on here to make copies of things to give to each task. This
+    // is okay, vs using ARCs, because the size of the cloned things are very small.
 
-    ////////////////////////////////
-    //// DOWNLAODS
-    ////////////////////////////////
+    join_set.spawn(install_musl_layer(arch, oci_blob_dir.clone()));
+    join_set.spawn(install_jre(
+        arch,
+        oci_blob_dir.clone(),
+        java_version.clone(),
+    ));
+
+    join_set.spawn(install_modloader(
+        oci_blob_dir.clone(),
+        in_container_minecraft_config.clone(),
+        index.dependencies.clone(),
+    ));
+
     if let Some(files) = index.files {
         for mrfile in files {
-            layers.push(
-                install_external_file(&oci_blob_dir, &in_container_minecraft_config, &mrfile)
-                    .await?,
-            );
+            join_set.spawn(install_external_file(
+                oci_blob_dir.clone(),
+                in_container_minecraft_config.clone(),
+                mrfile,
+            ));
         }
     }
 
-    ////////////////////////////////
-    //// OVERRIDES
-    ////////////////////////////////
-    layers.push(BuiltLayer {
-        layer_type: Overrides,
-        blob: extract_overrides_to_layer(
-            &mut zipfile,
-            &oci_blob_dir,
-            &in_container_minecraft_config,
-            "overrides",
-        )
-        .await?,
-        extra_config: None,
-    });
+    join_set.spawn(install_overrides(
+        oci_blob_dir.clone(),
+        in_container_minecraft_config.clone(),
+        mrpack_file.clone(),
+    ));
+    join_set.spawn(install_server_overrides(
+        oci_blob_dir.clone(),
+        in_container_minecraft_config.clone(),
+        mrpack_file.clone(),
+    ));
 
-    layers.push(BuiltLayer {
-        layer_type: ServerOverrides,
-        blob: extract_overrides_to_layer(
-            &mut zipfile,
-            &oci_blob_dir,
-            &in_container_minecraft_config,
-            "server-overrides",
-        )
-        .await?,
-        extra_config: None,
-    });
+    join_set.spawn(install_directory_permissions(
+        oci_blob_dir.clone(),
+        in_container_minecraft_config.clone(),
+    ));
 
-    layers
-        .push(install_directory_permissions(&oci_blob_dir, &in_container_minecraft_config).await?);
+    info!(
+        arch = ?arch,
+        "Building image layers");
+    let mut layers: Vec<BuiltLayer> = vec![];
+    while let Some(join) = join_set.join_next().await {
+        match join {
+            Ok(res) => match res {
+                Ok(layer) => layers.push(layer),
+                Err(err) => {
+                    error!(error = err.to_string(), "Encountered error while building layer");
+                    join_set.abort_all();
+                    return Err(err)
+                }
+            },
+            Err(err) => {
+                error!(error = err.to_string(), "Encountered error with concurrent execution");
+                join_set.abort_all();
+                return Err(anyhow::Error::from(err))
+            }
+        }
+    }
 
     // Sort the layers, they could be in a random order. So we need to get them into a stable one that's repeatable over runs.
     layers.sort_by_key(|f| f.layer_type.clone());
@@ -311,12 +361,16 @@ async fn main() -> anyhow::Result<()> {
                 .collect::<Vec<String>>()
                 .join(":")),
     );
-    cmd.extend(
+    let mut opts =
         java_config
             .properties
             .iter()
-            .map(|(k, v)| format!("-D{}={}", k, v)),
-    );
+            .map(|(k, v)| format!("-D{}={}", k, v))
+            .collect::<Vec<String>>();
+    // Sort required for stability between runs
+    opts.sort();
+    cmd.extend(opts);
+    
     cmd.push(java_config.main_class.clone());
     let config_file = ConfigFile {
         architecture: arch.oci(),
@@ -433,6 +487,7 @@ async fn main() -> anyhow::Result<()> {
     info!(
         path = index_file_path.as_os_str().to_str().unwrap(),
         len_bytes = index_bytes.len(),
+        manifest_digest = manifest_blob.digest(), 
         "Wrote OCI Index file"
     );
 
@@ -473,62 +528,106 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn install_directory_permissions(
-    oci_blob_dir: &Path,
-    in_container_minecraft_config: &InContainerMinecraftConfig,
+async fn install_overrides<P: AsRef<Path>>(
+    oci_blob_dir: P,
+    in_container_minecraft_config: InContainerMinecraftConfig,
+    mrpack_file: ZipFileReader,
+) -> anyhow::Result<BuiltLayer> {
+    Ok(BuiltLayer {
+        layer_type: Overrides,
+        blob: extract_overrides_to_layer(
+            &mrpack_file,
+            &oci_blob_dir,
+            &in_container_minecraft_config,
+            "overrides",
+        )
+        .await?,
+        extra_config: None,
+    })
+}
+async fn install_server_overrides<P: AsRef<Path>>(
+    oci_blob_dir: P,
+    in_container_minecraft_config: InContainerMinecraftConfig,
+    mrpack_file: ZipFileReader,
+) -> anyhow::Result<BuiltLayer> {
+    Ok(BuiltLayer {
+        layer_type: ServerOverrides,
+        blob: extract_overrides_to_layer(
+            &mrpack_file,
+            &oci_blob_dir,
+            &in_container_minecraft_config,
+            "server-overrides",
+        )
+        .await?,
+        extra_config: None,
+    })
+}
+async fn install_directory_permissions<P: AsRef<Path>>(
+    oci_blob_dir: P,
+    in_container_minecraft_config: InContainerMinecraftConfig,
 ) -> anyhow::Result<BuiltLayer> {
     let mut permissions_layer_builder = TarLayerBuilder::new(&oci_blob_dir).await?;
     // Set permissions on some directories
     permissions_layer_builder
-        .append_directory(&FileInfo {
-            path: Path::new("/tmp").to_path_buf(),
-            // World writable
-            mode: 0o777,
-            uid: 0,
-            gid: 0,
-            last_modified: 0,
-        })
+        .append_directory(
+            "/tmp",
+            &FileInfo {
+                // World writable
+                mode: 0o777,
+                uid: 0,
+                gid: 0,
+                last_modified: 0,
+            },
+        )
         .await?;
     permissions_layer_builder
-        .append_directory(&FileInfo {
-            path: Path::new("/var").to_path_buf(),
-            mode: 0o755,
-            uid: 0,
-            gid: 0,
-            last_modified: 0,
-        })
+        .append_directory(
+            "/var",
+            &FileInfo {
+                mode: 0o755,
+                uid: 0,
+                gid: 0,
+                last_modified: 0,
+            },
+        )
         .await?;
     permissions_layer_builder
-        .append_directory(&FileInfo {
-            path: in_container_minecraft_config.minecraft_working_dir.clone(),
-            mode: 0o755,
-            uid: 1000,
-            gid: 1000,
-            last_modified: 0,
-        })
+        .append_directory(
+            &in_container_minecraft_config.minecraft_working_dir,
+            &FileInfo {
+                mode: 0o755,
+                uid: 1000,
+                gid: 1000,
+                last_modified: 0,
+            },
+        )
         .await?;
     // This is a commonly-used directory that Minecraft will want to *write* into
     permissions_layer_builder
-        .append_directory(&FileInfo {
-            path: in_container_minecraft_config
+        .append_directory(
+            in_container_minecraft_config
                 .minecraft_working_dir
                 .join("config"),
-            mode: 0o755,
-            uid: 1000,
-            gid: 1000,
-            last_modified: 0,
-        })
+            &FileInfo {
+                mode: 0o755,
+                uid: 1000,
+                gid: 1000,
+                last_modified: 0,
+            },
+        )
         .await?;
     permissions_layer_builder
-        .append_directory(&FileInfo {
-            path: in_container_minecraft_config
+        .append_directory(
+            in_container_minecraft_config
                 .minecraft_working_dir
                 .join("libraries"),
-            mode: 0o755,
-            uid: 1000,
-            gid: 1000,
-            last_modified: 0,
-        })
+            &FileInfo {
+                mode: 0o755,
+                uid: 1000,
+                gid: 1000,
+                last_modified: 0,
+            },
+        )
         .await?;
     let minecraft_layer = permissions_layer_builder.finalise().await?;
     info!(
@@ -543,10 +642,10 @@ async fn install_directory_permissions(
     })
 }
 
-async fn install_external_file(
-    oci_blob_dir: &Path,
-    in_container_minecraft_config: &InContainerMinecraftConfig,
-    mrfile: &packfile::File,
+async fn install_external_file<P: AsRef<Path>>(
+    oci_blob_dir: P,
+    in_container_minecraft_config: InContainerMinecraftConfig,
+    mrfile: packfile::File,
 ) -> anyhow::Result<BuiltLayer> {
     if let Some(env) = &mrfile.env {
         match env.server {
@@ -577,8 +676,8 @@ async fn install_external_file(
     let mut file_layer_builder = TarLayerBuilder::new(&oci_blob_dir).await?;
     let digest: [u8; 64] = file_layer_builder
         .append_file_from_url(
+            &container_path,
             FileInfo {
-                path: container_path.clone(),
                 mode: if guess_is_writable(&container_path) {
                     0o666
                 } else {
@@ -619,10 +718,10 @@ async fn install_external_file(
     })
 }
 
-async fn install_modloader(
-    oci_blob_dir: &Path,
-    in_container_minecraft_config: &InContainerMinecraftConfig,
-    deps: &Dependencies,
+async fn install_modloader<P: AsRef<Path>, C: Into<InContainerMinecraftConfig>>(
+    oci_blob_dir: P,
+    in_container_minecraft_config: C,
+    deps: Dependencies,
 ) -> anyhow::Result<BuiltLayer> {
     // Install the mod loader
     // The way we need to configure the container later will depend on the mod loader. So we'll get
@@ -630,8 +729,8 @@ async fn install_modloader(
     Ok(if let Some(fabric_version) = &deps.fabric_loader {
         info!(fabric_version = &fabric_version, "Using Fabric modloader");
         let (java_config, blob) = fabric::build_fabric_layer(
-            &oci_blob_dir,
-            &in_container_minecraft_config,
+            oci_blob_dir.as_ref(),
+            &in_container_minecraft_config.into(),
             &deps.minecraft,
             &fabric_version,
         )
@@ -644,8 +743,8 @@ async fn install_modloader(
     } else if let Some(quilt_version) = &deps.quilt_loader {
         info!(quilt_version = &quilt_version, "Using Quilt modloader");
         let (java_config, blob) = quilt::build_quilt_layer(
-            &oci_blob_dir,
-            &in_container_minecraft_config,
+            oci_blob_dir.as_ref(),
+            &in_container_minecraft_config.into(),
             &deps.minecraft,
             &quilt_version,
         )
@@ -666,12 +765,12 @@ async fn install_modloader(
     })
 }
 
-async fn install_jre(
+async fn install_jre<P: AsRef<Path>, S: AsRef<str>>(
     arch: Architecture,
-    oci_blob_dir: &Path,
-    java_version: &str,
+    oci_blob_dir: P,
+    java_version: S,
 ) -> anyhow::Result<BuiltLayer> {
-    let jre_download = adoptium::get_jre_download(&java_version, arch).await?;
+    let jre_download = adoptium::get_jre_download(java_version.as_ref(), arch).await?;
     info!(
         url = jre_download.url.to_string(),
         sha256 = hex::encode_upper(jre_download.sha256),
@@ -680,11 +779,11 @@ async fn install_jre(
 
     // Download and stream into a layer
     let request = reqwest::get(jre_download.url).await?;
-    let mut jre_tar_stream = BufReader::new(GzipDecoder::new(tokio_util::io::StreamReader::new(
+    let mut jre_tar_stream = BufReader::new(GzipDecoder::new(BufReader::new(tokio_util::io::StreamReader::new(
         request
             .bytes_stream()
             .map_err(|e| std::io::Error::new(ErrorKind::Other, e)),
-    )));
+    ))));
     let container_path = Path::new("/usr/local/java");
     let mut jre_layer_builder = TarLayerBuilder::new(&oci_blob_dir).await?;
     loop {
@@ -710,13 +809,15 @@ async fn install_jre(
         match entry_type {
             EntryType::Directory => {
                 jre_layer_builder
-                    .append_directory(&FileInfo {
-                        path: p,
-                        mode: 0o755,
-                        uid: 0,
-                        gid: 0,
-                        last_modified: 0,
-                    })
+                    .append_directory(
+                        &p,
+                        &FileInfo {
+                            mode: 0o755,
+                            uid: 0,
+                            gid: 0,
+                            last_modified: 0,
+                        },
+                    )
                     .await?;
             }
             EntryType::Regular => {
@@ -736,8 +837,8 @@ async fn install_jre(
                 };
                 jre_layer_builder
                     .append_file(
+                        &p,
                         &FileInfo {
-                            path: p,
                             mode,
                             uid: 0,
                             gid: 0,
@@ -782,8 +883,8 @@ async fn install_jre(
                 );
                 jre_layer_builder
                     .append_symlink(
+                        &p,
                         &FileInfo {
-                            path: p,
                             mode,
                             uid: 0,
                             gid: 0,
@@ -801,14 +902,14 @@ async fn install_jre(
     // Write an extra symlink
     jre_layer_builder
         .append_symlink(
+            "/bin/java",
             &FileInfo {
-                path: Path::new("/bin/java").to_path_buf(),
                 mode: 0o755,
                 uid: 0,
                 gid: 0,
                 last_modified: 0,
             },
-            Path::new("/usr/local/java/bin/java"),
+            "/usr/local/java/bin/java",
         )
         .await?;
     let jre_layer = jre_layer_builder.finalise().await?;
@@ -824,7 +925,10 @@ async fn install_jre(
     })
 }
 
-async fn install_musl_layer(arch: Architecture, oci_blob_dir: &Path) -> anyhow::Result<BuiltLayer> {
+async fn install_musl_layer<P: AsRef<Path>>(
+    arch: Architecture,
+    oci_blob_dir: P,
+) -> anyhow::Result<BuiltLayer> {
     ////////////////////////////////
     //// MUSL
     ////////////////////////////////
@@ -850,13 +954,15 @@ async fn install_musl_layer(arch: Architecture, oci_blob_dir: &Path) -> anyhow::
     );
     let mut musl_layer_builder = TarLayerBuilder::new(&oci_blob_dir).await?;
     musl_layer_builder
-        .append_directory(&FileInfo {
-            path: "/lib".into(),
-            mode: 0o755,
-            uid: 0,
-            gid: 0,
-            last_modified: 0,
-        })
+        .append_directory(
+            "/lib",
+            &FileInfo {
+                mode: 0o755,
+                uid: 0,
+                gid: 0,
+                last_modified: 0,
+            },
+        )
         .await?;
     // TODO This is the worst code I've ever written
     // throw away the first 120 bytes
@@ -960,8 +1066,8 @@ async fn install_musl_layer(arch: Architecture, oci_blob_dir: &Path) -> anyhow::
                             "Found shared library");
                 musl_layer_builder
                     .append_file(
+                        format!("/lib/ld-musl-{}.so.1", arch.linux()),
                         &FileInfo {
-                            path: format!("/lib/ld-musl-{}.so.1", arch.linux()).into(),
                             mode: 0o0755,
                             uid: 0,
                             gid: 0,
@@ -979,8 +1085,8 @@ async fn install_musl_layer(arch: Architecture, oci_blob_dir: &Path) -> anyhow::
                 container_path.push(path.to_path_buf().to_path_buf());
                 musl_layer_builder
                     .append_file(
+                        &container_path,
                         &FileInfo {
-                            path: container_path,
                             mode: 0o0644,
                             uid: 0,
                             gid: 0,
