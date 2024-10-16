@@ -89,7 +89,7 @@ jobs:
       - name: Debug Output for Investigations
         run: |
           tree output/
-          ln -l output/blobs/sha256
+          ls -l output/blobs/sha256
           jq <output/index.json
           jq <"output/blobs/sha256/$(jq <output/index.json -r '.manifests[0].digest' | awk '{split($0,a,":"); print a[2]}')"
       - name: Report Image Digest
