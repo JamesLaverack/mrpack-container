@@ -1,3 +1,4 @@
+use anyhow::{bail, Context};
 use digest::Digest;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -132,7 +133,7 @@ pub async fn build_fabric_layer(
                 &url::Url::parse(&download_url.to_str().unwrap())?,
                 Sha256::new(),
             )
-            .await?
+            .await.context(format!("Failed to append fabric library from {}", &download_url.to_str().unwrap()))?
             .into();
 
         info!(
