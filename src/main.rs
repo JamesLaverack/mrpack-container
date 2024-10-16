@@ -1064,9 +1064,9 @@ async fn install_musl_layer<P: AsRef<Path>>(
             "Parsed data.tar.xz TAR header"
         );
         if entry_type == EntryType::Regular
-            && (path.ends_with("Libc.so") || path.starts_with(Path::new("./usr/share/doc/")))
+            && (path.ends_with("libc.so") || path.starts_with(Path::new("./usr/share/doc/")))
         {
-            if path.ends_with("Libc.so") {
+            if path.ends_with("libc.so") {
                 debug!(
                             path = ?path,
                             "Found shared library");
