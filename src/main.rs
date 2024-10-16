@@ -208,7 +208,6 @@ async fn main() -> anyhow::Result<()> {
         None => bail!("Architecture not supported"),
     };
 
-
     // Load the pack file
     let path = Path::new(&args.mr_pack_file);
     if !path.exists() {
@@ -311,15 +310,21 @@ async fn main() -> anyhow::Result<()> {
             Ok(res) => match res {
                 Ok(layer) => layers.push(layer),
                 Err(err) => {
-                    error!(error = err.to_string(), "Encountered error while building layer");
+                    error!(
+                        error = err.to_string(),
+                        "Encountered error while building layer"
+                    );
                     join_set.abort_all();
-                    return Err(err)
+                    return Err(err);
                 }
             },
             Err(err) => {
-                error!(error = err.to_string(), "Encountered error with concurrent execution");
+                error!(
+                    error = err.to_string(),
+                    "Encountered error with concurrent execution"
+                );
                 join_set.abort_all();
-                return Err(anyhow::Error::from(err))
+                return Err(anyhow::Error::from(err));
             }
         }
     }
@@ -361,16 +366,15 @@ async fn main() -> anyhow::Result<()> {
                 .collect::<Vec<String>>()
                 .join(":")),
     );
-    let mut opts =
-        java_config
-            .properties
-            .iter()
-            .map(|(k, v)| format!("-D{}={}", k, v))
-            .collect::<Vec<String>>();
+    let mut opts = java_config
+        .properties
+        .iter()
+        .map(|(k, v)| format!("-D{}={}", k, v))
+        .collect::<Vec<String>>();
     // Sort required for stability between runs
     opts.sort();
     cmd.extend(opts);
-    
+
     cmd.push(java_config.main_class.clone());
     let config_file = ConfigFile {
         architecture: arch.oci(),
@@ -487,7 +491,7 @@ async fn main() -> anyhow::Result<()> {
     info!(
         path = index_file_path.as_os_str().to_str().unwrap(),
         len_bytes = index_bytes.len(),
-        manifest_digest = manifest_blob.digest(), 
+        manifest_digest = manifest_blob.digest(),
         "Wrote OCI Index file"
     );
 
@@ -779,11 +783,13 @@ async fn install_jre<P: AsRef<Path>, S: AsRef<str>>(
 
     // Download and stream into a layer
     let request = reqwest::get(jre_download.url).await?;
-    let mut jre_tar_stream = BufReader::new(GzipDecoder::new(BufReader::new(tokio_util::io::StreamReader::new(
-        request
-            .bytes_stream()
-            .map_err(|e| std::io::Error::new(ErrorKind::Other, e)),
-    ))));
+    let mut jre_tar_stream = BufReader::new(GzipDecoder::new(BufReader::new(
+        tokio_util::io::StreamReader::new(
+            request
+                .bytes_stream()
+                .map_err(|e| std::io::Error::new(ErrorKind::Other, e)),
+        ),
+    )));
     let container_path = Path::new("/usr/local/java");
     let mut jre_layer_builder = TarLayerBuilder::new(&oci_blob_dir).await?;
     loop {
