@@ -21,6 +21,9 @@ jobs:
         mrpackfile: [quilt-simple.mrpack, fabric-simple.mrpack]
     steps:
       - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            tests/mrpacks
       - uses: actions/download-artifact@v4
         with:
           name: binary
@@ -58,3 +61,41 @@ jobs:
             echo "Level file not found!"
             false
           fi
+  stability:
+    # Build the same image multiple times, and make sure they're the same.
+    runs-on: ubuntu-latest
+    needs: build
+    strategy:
+      matrix:
+        instance: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            tests/mrpacks
+      - uses: actions/download-artifact@v4
+        with:
+          name: binary
+          path: /usr/local/bin
+          merge-multiple: true
+      - name: Install mrpack-container
+        run: chmod +x /usr/local/bin/mrpack-container
+      - name: Build Container
+        run: mrpack-container --output ./output "tests/mrpacks/fabric-simple.mrpack"
+      - name: Compress Container
+        run: tar czf image.tar.gz -C ./output .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: container-${{matrix.instance}}
+          path: image.tar.gz
+  verify-stability:
+    runs-on: ubuntu-latest
+    needs: stability
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: container-*
+      - name: Compare artifacts
+        run: |
+          tree
+          find . -type f -name '*.tar.gz' -exec sha256sum
