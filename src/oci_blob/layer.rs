@@ -275,23 +275,4 @@ impl TarLayerBuilder {
             compressed_size: total_compressed_bytes as u64,
         })
     }
-
-    pub async fn cancel(mut self) -> Result<(), super::LayerBuilderError> {
-        self.writer
-            .shutdown()
-            .await
-            .map_err(|s| super::LayerBuilderError::TmpFileWrite {
-                path: self.tmp_tarfile_path.clone(),
-                source: s,
-            })?;
-        // Rename it to the checksum
-        tokio::fs::remove_file(&self.tmp_tarfile_path)
-            .await
-            .map_err(|s| super::LayerBuilderError::TmpFileDelete {
-                path: self.tmp_tarfile_path.clone(),
-                source: s,
-            })?;
-        debug!("Cancelled layer");
-        Ok(())
-    }
 }

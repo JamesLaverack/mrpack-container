@@ -53,8 +53,6 @@ pub enum LayerBuilderError {
     },
     #[error("Failed to write to tar file '{path}'")]
     TmpFileWrite { path: PathBuf, source: io::Error },
-    #[error("Failed to delete tmp tar file '{path}'")]
-    TmpFileDelete { path: PathBuf, source: io::Error },
     #[error("Failed to rename tar file from temporary name '{from_path}' to final blob name '{to_path}'")]
     TmpFileRename {
         from_path: PathBuf,

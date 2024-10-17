@@ -1,3 +1,4 @@
+use anyhow::Context;
 use digest::Digest;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -51,7 +52,7 @@ pub fn split_artefact(artefact: &str) -> anyhow::Result<(Vec<&str>, &str, &str)>
         anyhow::bail!("Invalid version")
     }
 
-    return Ok((group_id, artifact_id, version));
+    Ok((group_id, artifact_id, version))
 }
 
 pub async fn build_quilt_layer(
@@ -132,7 +133,11 @@ pub async fn build_quilt_layer(
                 &url::Url::parse(&download_url.to_str().unwrap())?,
                 Sha256::new(),
             )
-            .await?
+            .await
+            .context(format!(
+                "Failed to append quilt library from {}",
+                &download_url.to_str().unwrap()
+            ))?
             .into();
 
         info!(
