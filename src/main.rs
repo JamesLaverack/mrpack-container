@@ -837,7 +837,8 @@ async fn install_jre<P: AsRef<Path>, S: AsRef<str>>(
                             last_modified: 0,
                         },
                     )
-                    .await.context("Failed to append directory from JVM tarfile")?;
+                    .await
+                    .context("Failed to append directory from JVM tarfile")?;
             }
             EntryType::Regular => {
                 let file_size = header.size()?;
@@ -866,7 +867,8 @@ async fn install_jre<P: AsRef<Path>, S: AsRef<str>>(
                         file_size,
                         &mut (&mut jre_tar_stream).take(size),
                     )
-                    .await.context("Failed to append file from JVM tarfile")?;
+                    .await
+                    .context("Failed to append file from JVM tarfile")?;
                 // Read the padding bytes from the stream
                 let remaining = 512 - (file_size % 512) as usize;
                 if remaining < 512 {
@@ -911,7 +913,8 @@ async fn install_jre<P: AsRef<Path>, S: AsRef<str>>(
                         },
                         &target,
                     )
-                    .await.context("Failed to append symlink from JVM tarfile")?;
+                    .await
+                    .context("Failed to append symlink from JVM tarfile")?;
             }
             _ => {
                 bail!("Unsupported entry type {:?}", entry_type)
@@ -930,7 +933,8 @@ async fn install_jre<P: AsRef<Path>, S: AsRef<str>>(
             },
             "/usr/local/java/bin/java",
         )
-        .await.context("Failed to append symlink for JVM at /bin/java")?;
+        .await
+        .context("Failed to append symlink for JVM at /bin/java")?;
     let jre_layer = jre_layer_builder.finalise().await?;
     info!(
         path = ?jre_layer.path,
@@ -982,7 +986,8 @@ async fn install_musl_layer<P: AsRef<Path>>(
                 last_modified: 0,
             },
         )
-        .await.context("Failed to append directory for /lib")?;
+        .await
+        .context("Failed to append directory for /lib")?;
     // TODO This is the worst code I've ever written
     // throw away the first 120 bytes
     debug!("Skipping 120 bytes of file header, debian-binary file, and control.tar.xz header");
@@ -1095,7 +1100,8 @@ async fn install_musl_layer<P: AsRef<Path>>(
                         size,
                         &mut (&mut musl_data_stream).take(size),
                     )
-                    .await.context("Failed to append library file for MUSL")?;
+                    .await
+                    .context("Failed to append library file for MUSL")?;
             } else {
                 debug!(
                             path = ?path,
@@ -1114,7 +1120,8 @@ async fn install_musl_layer<P: AsRef<Path>>(
                         size,
                         &mut (&mut musl_data_stream).take(size),
                     )
-                    .await.context("Failed to append documentation/license file for MUSL")?;
+                    .await
+                    .context("Failed to append documentation/license file for MUSL")?;
             }
             let remaining = 512 - (size % 512) as usize;
             if remaining < 512 {

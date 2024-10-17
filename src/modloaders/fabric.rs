@@ -1,4 +1,4 @@
-use anyhow::{bail, Context};
+use anyhow::Context;
 use digest::Digest;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -52,7 +52,7 @@ pub fn split_artefact(artefact: &str) -> anyhow::Result<(Vec<&str>, &str, &str)>
         anyhow::bail!("Invalid version")
     }
 
-    return Ok((group_id, artifact_id, version));
+    Ok((group_id, artifact_id, version))
 }
 
 pub async fn build_fabric_layer(
@@ -133,7 +133,11 @@ pub async fn build_fabric_layer(
                 &url::Url::parse(&download_url.to_str().unwrap())?,
                 Sha256::new(),
             )
-            .await.context(format!("Failed to append fabric library from {}", &download_url.to_str().unwrap()))?
+            .await
+            .context(format!(
+                "Failed to append fabric library from {}",
+                &download_url.to_str().unwrap()
+            ))?
             .into();
 
         info!(
