@@ -58,6 +58,13 @@ or use [Skopeo](https://github.com/containers/skopeo) to upload it directly to a
 skopeo copy --format=oci oci:./output docker://registry.example.com/my-modpack:latest
 ```
 
+## Multi-Architecture Images
+
+By default, mrpack-container builds native multi-architecture images for both amd64 and arm64 platforms.
+You can customise this behaviour with the `--arches` flag.
+Some tools do not work correctly with multi-architecture images.
+In this case, you will need to either generate an image just for your architecture, or 'split' the image into one per architecture.
+
 ## Using Images
 
 You will need to mount:
