@@ -108,9 +108,9 @@ jobs:
       - name: Compare artifacts
         run: |
           echo '${{ toJSON(needs.stability-test.outputs) }}'
-          if [[ "${{ needs.stability-test.outputs.digest_1 }}" != "${{ needs.stability_test.outputs.digest_2 }}" ]]; then
-            echo "Comparsion failure. Containers did not match!'
+          if [[ '${{ needs.stability-test.outputs.digest_1 }}' != '${{ needs.stability_test.outputs.digest_2 }}' ]]; then
+            echo 'Comparsion failure. Containers did not match!'
           fi
-          if [[ "${{ needs.stability-test.outputs.digest_1 }}" != "${{ needs.stability_test.outputs.digest_3 }}" ]]; then
-            echo "Comparsion failure. Containers did not match!'
+          if [[ '${{ needs.stability-test.outputs.digest_1 }}' != '${{ needs.stability_test.outputs.digest_3 }}' ]]; then
+            echo 'Comparsion failure. Containers did not match!'
           fi
