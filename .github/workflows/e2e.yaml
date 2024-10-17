@@ -61,8 +61,11 @@ jobs:
             echo "Level file not found!"
             false
           fi
+  # The stability test verifies that the output of mrpack-container is "stable". That is, if we build the same image
+  # multiple times do we get the same output byte-for-byte each time? We don't guarantee stability between different
+  # versions of mrpack-container (obviously), so this runs the same build on the same version three times, records the
+  # digests, and compares them.
   stability-test:
-    # Build the same image multiple times, and make sure they're the same.
     runs-on: ubuntu-latest
     needs: build
     strategy:
@@ -92,6 +95,9 @@ jobs:
           ls -l output/blobs/sha256
           jq <output/index.json
           jq <"output/blobs/sha256/$(jq <output/index.json -r '.manifests[0].digest' | awk '{split($0,a,":"); print a[2]}')"
+      # We can record and then compare just the digest reported in the index.json file. By definition, it will be the
+      # SHA256 sum of the manifest of the image, which itself contains the SHA256 sums of each layer tarball and the
+      # JSON config file.
       - name: Report Image Digest
         id: digest
         run: echo "digest_${{matrix.instance}}=$(jq <output/index.json '.manifests[0].digest')" >> "$GITHUB_OUTPUT"
@@ -102,3 +108,9 @@ jobs:
       - name: Compare artifacts
         run: |
           echo '${{ toJSON(needs.stability-test.outputs) }}'
+          if [[ "${{ needs.stability-test.outputs.digest_1 }}" != "${{ needs.stability_test.outputs.digest_2 }}" ]]; then
+            echo "Comparsion failure. Containers did not match!'
+          fi
+          if [[ "${{ needs.stability-test.outputs.digest_1 }}" != "${{ needs.stability_test.outputs.digest_3 }}" ]]; then
+            echo "Comparsion failure. Containers did not match!'
+          fi
