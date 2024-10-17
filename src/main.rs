@@ -50,6 +50,16 @@ enum LayerType {
     Permissions,
 }
 
+impl LayerType {
+    fn applicable_for(&self, arch: Architecture) -> bool {
+        match self {
+            LayerType::Libc(a) => arch == *a,
+            LayerType::Java(a) => arch == *a,
+            _ => true,
+        }
+    }
+}
+
 struct BuiltLayer {
     layer_type: LayerType,
     blob: Option<Blob>,
@@ -65,8 +75,8 @@ struct Args {
     #[arg(long, short, help = "Output directory")]
     output: String,
 
-    #[arg(long, help = "Container Architecture", default_value = "amd64")]
-    arch: String,
+    #[arg(long, num_args = 1.., value_delimiter = ' ', help = "Container Architectures", default_value = "amd64 arm64")]
+    arches: Vec<String>,
 
     #[arg(long, help = "Fixed Java version")]
     java_version: Option<String>,
@@ -210,10 +220,19 @@ async fn main() -> anyhow::Result<()> {
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
-    let arch = match Architecture::parse(&args.arch) {
-        Some(a) => a,
-        None => bail!("Architecture not supported"),
-    };
+    // Parse architectures
+    let mut arches = args
+        .arches
+        .iter()
+        .map(|a| {
+            Architecture::parse(a).ok_or(anyhow::anyhow!(format!(
+                "Architecture '{}' not supported",
+                a
+            )))
+        })
+        .collect::<anyhow::Result<Vec<Architecture>>>()?;
+    arches.sort();
+    arches.dedup();
 
     // Load the pack file
     let path = Path::new(&args.mr_pack_file);
@@ -269,12 +288,14 @@ async fn main() -> anyhow::Result<()> {
     // There's a load of cloning going on here to make copies of things to give to each task. This
     // is okay, vs using ARCs, because the size of the cloned things are very small.
 
-    join_set.spawn(install_musl_layer(arch, oci_blob_dir.clone()));
-    join_set.spawn(install_jre(
-        arch,
-        oci_blob_dir.clone(),
-        java_version.clone(),
-    ));
+    for arch in &arches {
+        join_set.spawn(install_musl_layer(*arch, oci_blob_dir.clone()));
+        join_set.spawn(install_jre(
+            *arch,
+            oci_blob_dir.clone(),
+            java_version.clone(),
+        ));
+    }
 
     join_set.spawn(install_modloader(
         oci_blob_dir.clone(),
@@ -309,7 +330,7 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     info!(
-        arch = ?arch,
+        arches = ?arches,
         "Building image layers");
     let mut layers: Vec<BuiltLayer> = vec![];
     while let Some(join) = join_set.join_next().await {
@@ -381,89 +402,104 @@ async fn main() -> anyhow::Result<()> {
     // Sort required for stability between runs
     opts.sort();
     cmd.extend(opts);
-
     cmd.push(java_config.main_class.clone());
-    let config_file = ConfigFile {
-        architecture: arch.oci(),
-        os: oci_distribution::config::Os::Linux,
-        config: Some(oci_distribution::config::Config {
-            user: Some("1000:1000".to_string()),
-            // The default Minecraft server port
-            exposed_ports: Some(HashSet::from(["25565/tcp".to_string()])),
-            entrypoint: Some(vec!["/bin/java".to_string()]),
-            cmd: Some(cmd),
-            working_dir: Some("/var/minecraft".to_string()),
-            ..Default::default()
-        }),
-        history: Some(vec![oci_distribution::config::History {
-            // No timestamp, for stability
-            author: Some("mrpack-container".to_string()),
-            ..Default::default()
-        }]),
-        rootfs: oci_distribution::config::Rootfs {
-            r#type: "layers".to_string(),
-            diff_ids: layers
-                .iter()
-                .filter_map(|b| match &b.blob {
-                    Some(blob) => Some(blob),
-                    None => None,
-                })
-                .map(|b| b.diff_id_digest())
-                .collect(),
-        },
-        ..Default::default()
-    };
+
+    let config_files = arches
+        .iter()
+        .map(|arch| {
+            (
+                *arch,
+                ConfigFile {
+                    architecture: arch.oci(),
+                    os: oci_distribution::config::Os::Linux,
+                    config: Some(oci_distribution::config::Config {
+                        user: Some("1000:1000".to_string()),
+                        // The default Minecraft server port
+                        exposed_ports: Some(HashSet::from(["25565/tcp".to_string()])),
+                        entrypoint: Some(vec!["/bin/java".to_string()]),
+                        cmd: Some(cmd.clone()),
+                        working_dir: Some("/var/minecraft".to_string()),
+                        ..Default::default()
+                    }),
+                    history: Some(vec![oci_distribution::config::History {
+                        // No timestamp, for stability
+                        author: Some("mrpack-container".to_string()),
+                        ..Default::default()
+                    }]),
+                    rootfs: oci_distribution::config::Rootfs {
+                        r#type: "layers".to_string(),
+                        diff_ids: layers
+                            .iter()
+                            .filter_map(|b| match &b.blob {
+                                Some(blob) => Some(blob),
+                                None => None,
+                            })
+                            .map(|b| b.diff_id_digest())
+                            .collect(),
+                    },
+                    ..Default::default()
+                },
+            )
+        })
+        .collect::<HashMap<Architecture, ConfigFile>>();
 
     // Write out the config JSON file.
-    let mut config_blob_builder = JsonBlobBuilder::new(
-        &oci_blob_dir,
-        oci_distribution::manifest::IMAGE_CONFIG_MEDIA_TYPE.to_string(),
-    )
-    .await?;
-    config_blob_builder.append_json(&config_file).await?;
-    let config_blob = config_blob_builder.finalise().await?;
-    info!(
-        path = ?config_blob.path,
-        digest = config_blob.digest(),
-        entrypoint = config_file.config.as_ref().map(|c| c.entrypoint.as_ref()).flatten().map(|v| v.join(" ")).unwrap_or("[]".to_string()),
-        cmd = config_file.config.as_ref().map(|c| c.cmd.as_ref()).flatten().map(|v| v.join(" ")).unwrap_or("[]".to_string()),
-        working_dir = config_file.config.as_ref().map(|c| c.working_dir.as_ref()).flatten().unwrap_or(&"<none set>".to_string()),
-        user = config_file.config.as_ref().map(|c| c.user.as_ref()).flatten().unwrap_or(&"<not set>".to_string()),
-        "Wrote Container Config file"
-    );
+    let mut config_blobs: HashMap<Architecture, Blob> = HashMap::new();
+    for (arch, config_file) in config_files {
+        let mut config_blob_builder = JsonBlobBuilder::new(
+            &oci_blob_dir,
+            oci_distribution::manifest::IMAGE_CONFIG_MEDIA_TYPE.to_string(),
+        )
+        .await?;
+        config_blob_builder.append_json(&config_file).await?;
+        let config_blob = config_blob_builder.finalise().await?;
+        info!(
+            path = ?config_blob.path,
+            digest = config_blob.digest(),
+            entrypoint = config_file.config.as_ref().map(|c| c.entrypoint.as_ref()).flatten().map(|v| v.join(" ")).unwrap_or("[]".to_string()),
+            cmd = config_file.config.as_ref().map(|c| c.cmd.as_ref()).flatten().map(|v| v.join(" ")).unwrap_or("[]".to_string()),
+            working_dir = config_file.config.as_ref().map(|c| c.working_dir.as_ref()).flatten().unwrap_or(&"<none set>".to_string()),
+            user = config_file.config.as_ref().map(|c| c.user.as_ref()).flatten().unwrap_or(&"<not set>".to_string()),
+            "Wrote Container Config file"
+        );
+        config_blobs.insert(arch, config_blob);
+    }
 
     ////////////////////////////////
     //// CONTAINER MANIFEST
     ////////////////////////////////
-    let container_manifest = oci_distribution::manifest::OciImageManifest {
-        media_type: Some(oci_distribution::manifest::OCI_IMAGE_MEDIA_TYPE.to_string()),
-        config: OciDescriptor::from(&config_blob),
-        layers: layers
-            .iter()
-            .filter_map(|b| match &b.blob {
-                Some(blob) => Some(blob),
-                None => None,
-            })
-            .map(|b| OciDescriptor::from(b))
-            .collect(),
-        ..Default::default()
-    };
-    let mut manifest_blob_builder = JsonBlobBuilder::new(
-        &oci_blob_dir,
-        oci_distribution::manifest::OCI_IMAGE_MEDIA_TYPE.to_string(),
-    )
-    .await?;
-    manifest_blob_builder
-        .append_json(&container_manifest)
+    let mut manifest_blobs: HashMap<Architecture, Blob> = HashMap::new();
+    for (arch, config_blob) in config_blobs {
+        let container_manifest = oci_distribution::manifest::OciImageManifest {
+            media_type: Some(oci_distribution::manifest::OCI_IMAGE_MEDIA_TYPE.to_string()),
+            config: OciDescriptor::from(&config_blob),
+            layers: layers
+                .iter()
+                .filter(|blob| blob.layer_type.applicable_for(arch))
+                .filter_map(|b| match &b.blob {
+                    Some(blob) => Some(blob),
+                    None => None,
+                })
+                .map(|b| OciDescriptor::from(b))
+                .collect(),
+            ..Default::default()
+        };
+        let mut manifest_blob_builder = JsonBlobBuilder::new(
+            &oci_blob_dir,
+            oci_distribution::manifest::OCI_IMAGE_MEDIA_TYPE.to_string(),
+        )
         .await?;
-    let manifest_blob = manifest_blob_builder.finalise().await?;
-    // Write the manifest. In a docker image this is a file in the root named manifest.json
-    // in an OCI image it's also a blob.
-    info!(
-        path = ?manifest_blob.path,
-        digest = manifest_blob.digest(),
-        "Wrote Container Image Manifest file"
-    );
+        manifest_blob_builder
+            .append_json(&container_manifest)
+            .await?;
+        let manifest_blob = manifest_blob_builder.finalise().await?;
+        info!(
+            path = ?&manifest_blob.path,
+            digest = &manifest_blob.digest(),
+            "Wrote Container Image Manifest file"
+        );
+        manifest_blobs.insert(arch, manifest_blob);
+    }
 
     ////////////////////////////////
     //// TOP-LEVEL INDEX
@@ -471,20 +507,25 @@ async fn main() -> anyhow::Result<()> {
     let container_index = oci_distribution::manifest::OciImageIndex {
         schema_version: 2,
         media_type: Some(oci_distribution::manifest::OCI_IMAGE_INDEX_MEDIA_TYPE.to_string()),
-        manifests: vec![oci_distribution::manifest::ImageIndexEntry {
-            media_type: manifest_blob.media_type.to_string(),
-            size: manifest_blob.compressed_size as i64,
-            digest: manifest_blob.digest(),
-            platform: Some(oci_distribution::manifest::Platform {
-                architecture: arch.docker().to_string(),
-                os: "linux".to_string(),
-                os_version: None,
-                os_features: None,
-                variant: None,
-                features: None,
-            }),
-            annotations: None,
-        }],
+        manifests: manifest_blobs
+            .iter()
+            .map(
+                |(arch, manifest_blob)| oci_distribution::manifest::ImageIndexEntry {
+                    media_type: manifest_blob.media_type.to_string(),
+                    size: manifest_blob.compressed_size as i64,
+                    digest: manifest_blob.digest(),
+                    platform: Some(oci_distribution::manifest::Platform {
+                        architecture: arch.docker().to_string(),
+                        os: "linux".to_string(),
+                        os_version: None,
+                        os_features: None,
+                        variant: None,
+                        features: None,
+                    }),
+                    annotations: None,
+                },
+            )
+            .collect(),
         annotations: Some(HashMap::from([(
             oci_distribution::annotations::ORG_OPENCONTAINERS_IMAGE_REF_NAME.to_string(),
             index.name,
@@ -498,7 +539,6 @@ async fn main() -> anyhow::Result<()> {
     info!(
         path = index_file_path.as_os_str().to_str().unwrap(),
         len_bytes = index_bytes.len(),
-        manifest_digest = manifest_blob.digest(),
         "Wrote OCI Index file"
     );
 
