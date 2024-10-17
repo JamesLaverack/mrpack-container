@@ -35,7 +35,7 @@ pub async fn get_jre_download(
     )?;
     path.query_pairs_mut()
         .clear()
-        .append_pair("os", "alpine-linux")
+        .append_pair("os", "linux")
         .append_pair("architecture", adoptium_arch(&arch))
         .append_pair("image_type", "jre");
     info!(
@@ -52,12 +52,12 @@ pub async fn get_jre_download(
             .ok_or(anyhow!("JSON error (checksum)"))?,
         &mut checksum as &mut [u8],
     )?;
-    return Ok(JREDownload {
+    Ok(JREDownload {
         url: Url::parse(
             response[0]["binary"]["package"]["link"]
                 .as_str()
                 .ok_or(anyhow!("JSON error (link)"))?,
         )?,
         sha256: checksum,
-    });
+    })
 }
