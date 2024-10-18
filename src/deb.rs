@@ -1,6 +1,6 @@
 use crate::arch::Architecture;
 use crate::oci_blob::layer::{FileInfo, TarLayerBuilder};
-use crate::{deb, BuiltLayer, LayerType};
+use crate::{BuiltLayer, LayerType};
 use anyhow::Context;
 use async_compression::tokio::bufread::XzDecoder;
 use futures_util::TryStreamExt;
@@ -211,6 +211,27 @@ pub async fn install_debian_package<P: AsRef<Path>>(
                     )
                 }
             }
+        } else if header.entry_type() == EntryType::Symlink {
+            deb_layer_builder
+                .append_symlink(
+                    &newpath,
+                    &FileInfo {
+                        mode: 0o0755,
+                        uid: 0,
+                        gid: 0,
+                        last_modified: 0,
+                    },
+                    header.link_name().unwrap().unwrap(),
+                )
+                .await
+                .context(format!(
+                    "Failed to apply symlink {} (original path {}) targeting {} from deb {}, arch {}",
+                    &newpath.to_str().unwrap_or_default(),
+                    path.to_str().unwrap_or_default(),
+                    header.link_name().unwrap().unwrap().to_str().unwrap_or_default(),
+                    package.name,
+                    package.arch.debian()
+                ))?;
         } else {
             debug!("Skipping data.tar.xz entry {:?}", path);
             let expected_blocks = (size / 512) + (if size % 512 == 0 { 0 } else { 1 });

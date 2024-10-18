@@ -43,7 +43,7 @@ You need a Modrinth format modpack file (i.e., a `.mrpack` file).
 You can find these on [Modrinth](https://modrinth.com/modpacks), or use [packwiz](https://packwiz.infra.link/) to convert other formats of modpack to the Modrinth format.
 
 ```bash
-mrpack-container --output ./output my-modpack.mrpack
+mrpack-container --arches amd64 --output ./output my-modpack.mrpack
 ```
 
 The output is in OCI format in the given directory, but not compressed. You can use `tar` to compress it into a single file: `tar cf - -C ./output .`.
@@ -60,10 +60,27 @@ skopeo copy --format=oci oci:./output docker://registry.example.com/my-modpack:l
 
 ## Multi-Architecture Images
 
-By default, mrpack-container builds native multi-architecture images for both amd64 and arm64 platforms.
-You can customise this behaviour with the `--arches` flag.
+By default, `mrpack-container` builds native multi-architecture images for both amd64 and arm64 platforms.
+You can customise this behaviour with the `--arches` flag, as in the above examples.
 Some tools do not work correctly with multi-architecture images.
-In this case, you will need to either generate an image just for your architecture, or 'split' the image into one per architecture.
+In this case, you will need to either generate an image just for one architecture, or 'split' the image into one per architecture.
+The different images in a multi-image archive will be named `$version-$arch`, using the provided pack version number.
+For example, if the modpack `my-modpack.mrpack` is at version 1.2.3:
+
+```bash
+mrpack-container --arches amd64 --arhces arm64 --output ./output my-modpack.mrpack
+skopeo copy oci:output:1.2.3-arm64 oci-archive:arm64.tar
+skopeo copy oci:output:1.2.3-amd64 oci-archive:amd64.tar
+```
+
+When building a multi-architecture image, `mrpack-container` will output the container image names in the log output.
+
+You can also view the image names in the `index.json` file in the output directory.
+For example:
+
+```bash
+jq <output/index.json '.manifests[] | {arch: .platform.architecture, name: .annotations."org.opencontainers.image.ref.name"}'
+```
 
 ## Using Images
 
