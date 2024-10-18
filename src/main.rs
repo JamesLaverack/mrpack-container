@@ -1,5 +1,5 @@
 use anyhow::{bail, Context};
-use async_compression::tokio::bufread::{GzipDecoder, XzDecoder};
+use async_compression::tokio::bufread::GzipDecoder;
 use async_zip::tokio::read::fs::ZipFileReader;
 use clap::Parser;
 use futures::io::ErrorKind;
@@ -76,7 +76,7 @@ struct Args {
     #[arg(long, short, help = "Output directory")]
     output: String,
 
-    #[arg(long, num_args = 1.., value_delimiter = ' ', help = "Container Architectures", default_value = "amd64 arm64")]
+    #[arg(long, visible_alias = "arch", num_args = 1.., value_delimiter = ' ', help = "Container Architectures", default_value = "amd64 arm64")]
     arches: Vec<String>,
 
     #[arg(long, help = "Fixed Java version")]
@@ -147,6 +147,12 @@ async fn extract_overrides_to_layer<P: AsRef<Path>>(
 
     // Loop over the entries in order and write them into the layer.
     for (i, e) in &entries {
+        if e.dir().unwrap_or_default() {
+            debug!(
+                path = e.filename().as_str()?, 
+                "Skipping directory");
+            continue
+        }
         // In theory, it's possible to read from the zipfile entries in parallel. But that doesn't
         // help us get any faster because we can't *write* them in parallel. (Not without some
         // filesystem handle shenanigans anyway.)
@@ -290,11 +296,14 @@ async fn main() -> anyhow::Result<()> {
     // is okay, vs using ARCs, because the size of the cloned things are very small.
 
     for arch in &arches {
-        join_set.spawn(deb::install_debian_package(oci_blob_dir.clone(), deb::Package {
-            name: "libc6".to_string(),
-            version: "2.36-9+deb12u8".to_string(),
-            arch: *arch,
-        }));
+        join_set.spawn(deb::install_debian_package(
+            oci_blob_dir.clone(),
+            deb::Package {
+                name: "libc6".to_string(),
+                version: "2.36-9+deb12u8".to_string(),
+                arch: *arch,
+            },
+        ));
         join_set.spawn(install_jre(
             *arch,
             oci_blob_dir.clone(),
@@ -435,6 +444,7 @@ async fn main() -> anyhow::Result<()> {
                         r#type: "layers".to_string(),
                         diff_ids: layers
                             .iter()
+                            .filter(|blob| blob.layer_type.applicable_for(*arch))
                             .filter_map(|b| match &b.blob {
                                 Some(blob) => Some(blob),
                                 None => None,
@@ -527,7 +537,11 @@ async fn main() -> anyhow::Result<()> {
                         variant: None,
                         features: None,
                     }),
-                    annotations: None,
+                    annotations: Some(HashMap::from([(
+                        oci_distribution::annotations::ORG_OPENCONTAINERS_IMAGE_REF_NAME
+                            .to_string(),
+                        format!("{}-{}", index.version_id, arch.docker().to_string()),
+                    )])),
                 },
             )
             .collect(),
@@ -579,6 +593,22 @@ async fn main() -> anyhow::Result<()> {
         file_contents_to_accept = "eula=true",
         "You still need a file to accept the Minecraft EULA"
     );
+
+    info!("The created container is in OCI format, also known as oci-dir format. Tools that operate only on Docker images won't work. You can convert it into an oci-archive format by compressing the output directory into a tarball.");
+
+    if container_index.manifests.len() > 1 {
+        let names = container_index
+            .manifests
+            .iter()
+            .map(|m| {
+                m.annotations.as_ref().map(|a| a[oci_distribution::annotations::ORG_OPENCONTAINERS_IMAGE_REF_NAME].clone()).unwrap_or_default()
+            })
+            .collect::<Vec<String>>()
+            .join(", ");
+        info!(
+            names = names,
+            "This container is a multi-architecture OCI image. You may need to specify the name of the specific architecture you want. The individual images are named with their architectures.")
+    }
 
     info!("done!");
     Ok(())

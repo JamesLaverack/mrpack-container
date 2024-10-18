@@ -20,13 +20,6 @@ impl Architecture {
         }
     }
 
-    pub fn linux(&self) -> &str {
-        match self {
-            Architecture::X86_64 => "x86_64",
-            Architecture::ARM64 => "aarch64",
-        }
-    }
-
     pub fn debian(&self) -> &str {
         match self {
             Architecture::X86_64 => "amd64",
