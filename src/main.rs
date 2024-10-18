@@ -148,10 +148,8 @@ async fn extract_overrides_to_layer<P: AsRef<Path>>(
     // Loop over the entries in order and write them into the layer.
     for (i, e) in &entries {
         if e.dir().unwrap_or_default() {
-            debug!(
-                path = e.filename().as_str()?, 
-                "Skipping directory");
-            continue
+            debug!(path = e.filename().as_str()?, "Skipping directory");
+            continue;
         }
         // In theory, it's possible to read from the zipfile entries in parallel. But that doesn't
         // help us get any faster because we can't *write* them in parallel. (Not without some
@@ -601,7 +599,12 @@ async fn main() -> anyhow::Result<()> {
             .manifests
             .iter()
             .map(|m| {
-                m.annotations.as_ref().map(|a| a[oci_distribution::annotations::ORG_OPENCONTAINERS_IMAGE_REF_NAME].clone()).unwrap_or_default()
+                m.annotations
+                    .as_ref()
+                    .map(|a| {
+                        a[oci_distribution::annotations::ORG_OPENCONTAINERS_IMAGE_REF_NAME].clone()
+                    })
+                    .unwrap_or_default()
             })
             .collect::<Vec<String>>()
             .join(", ");
