@@ -1,5 +1,7 @@
 # mrpack-container
 
+[![End to End Test](https://github.com/JamesLaverack/mrpack-container/actions/workflows/e2e.yaml/badge.svg?branch=main)](https://github.com/JamesLaverack/mrpack-container/actions/workflows/e2e.yaml)
+
 Turn Modrinth modpack (`.mrpack`) files directly into ready-to-use container images.
 
 `mrpack-container` is:
