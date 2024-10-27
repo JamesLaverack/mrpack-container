@@ -5,16 +5,15 @@
 
 Turn Modrinth modpack (`.mrpack`) files directly into ready-to-use container images.
 
-`mrpack-container` is:
-- Fast to run
-- Does not require a JVM
-- Does not require a container runtime
-- Does not need to run on the same architecture you are building an image for
-
+- Fast to run (~10–20 seconds)
+- No JVM needed
+- No container runtime (Docker, Podman, etc.) needed
+  
 The resulting containers are:
 - Small, usually a few hundred MB depending on mods installed
 - Fast to start up, with no downloads on bootup required
 - Security focused, running as non-root with the majority of the filesystem immutable
+- Multi-architecture (AMD64 and ARM64) by default.
 
 ## Warnings
 
@@ -22,13 +21,9 @@ You are responsible for adhering to the licensing requirements of the mod files 
 This project is not affiliated with Modrinth.
 NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.
 
-**This is pre-Alpha and is under construction.**
-In particular, the code quality is awful because this is thrown together.
-Many things are not yet supported.
-
 ## Installing
 
-Right now you will need to clone this repository with git, and then build the mrpack-container binary with Rust.
+You will need to clone this repository with git, and then build the mrpack-container binary with Rust.
 You will need to have a [Rust toolchain](https://www.rust-lang.org/tools/install) installed for your platform.
 
 For example:
@@ -46,10 +41,10 @@ You need a Modrinth format modpack file (i.e., a `.mrpack` file).
 You can find these on [Modrinth](https://modrinth.com/modpacks), or use [packwiz](https://packwiz.infra.link/) to convert other formats of modpack to the Modrinth format.
 
 ```bash
-mrpack-container --arches amd64 --output ./output my-modpack.mrpack
+mrpack-container --arch amd64 --output ./output my-modpack.mrpack
 ```
 
-The output is in OCI format in the given directory, but not compressed. You can use `tar` to compress it into a single file: `tar cf - -C ./output .`.
+The output is in OCI format in the given output directory, but not compressed. You can use `tar` to compress it into a single file: `tar cf - -C ./output .`.
 
 You can load and execute the produced image directly with a container runtime.
 ```bash
@@ -64,7 +59,7 @@ skopeo copy --format=oci oci:./output docker://registry.example.com/my-modpack:l
 ## Multi-Architecture Images
 
 By default, `mrpack-container` builds native multi-architecture images for both amd64 and arm64 platforms.
-You can customise this behaviour with the `--arches` flag, as in the above examples.
+You can customise this behaviour with the `--arches`/`--arch` flag, as in the above examples.
 Some tools do not work correctly with multi-architecture images.
 In this case, you will need to either generate an image just for one architecture, or 'split' the image into one per architecture.
 The different images in a multi-image archive will be named `$version-$arch`, using the provided pack version number.
@@ -87,7 +82,7 @@ jq <output/index.json '.manifests[] | {arch: .platform.architecture, name: .anno
 
 ## Using Images
 
-You will need to mount:
+You will need to provide and mount into the running container:
 - A Minecraft server JAR from Mojang, of the correct Minecraft version for your mods and loader, usually mounted at `/usr/lib/minecraft/sever.jar`
 - A file to accept the Minecraft [EULA](https://www.minecraft.net/en-us/eula), usually a text file containing `eula=true` at `/var/minecraft/eula.txt`.
 
@@ -107,23 +102,22 @@ podman run \
   -v "$(pwd)"/world:/var/minecraft/world \
   -v "$(pwd)"/server.jar:/usr/lib/minecraft/server.jar:ro \
   -v "$(pwd)"/eula.txt:/var/minecraft/eula.txt:ro \
-  <container_id>
+  <image_id>
 ```
 Will run the server and make it available on `localhost:25565`.
 
 ## Container Structure
 
 In general:
-- `/bin`, `/lib`, `/usr/local/java`, and `/usr/share/doc` are used for system-level dependencies, i.e., Java.
+- `/bin`, `/lib`, and `/usr/` are used for system-level dependencies, i.e., Java.
 - `/usr/local/minecraft` is used for immutable files to do with the Minecraft install.
 - `/var/minecraft` is used for things that are mostly expected to be mutable at runtime.
 
 In detail:
 - `/bin` with a simlink for `/bin/java` (to `/usr/local/java/bin/java`)
-- `/lib` with the musl Libc library
+- `/lib` with the glibc library
 - `/usr/local/java` with the JVM
 - `/usr/local/minecraft/lib` with modloader libraries
-- `/usr/share/doc/musl` with copyright information for musl
 
 The files and overrides in the Modrinth file are unpacked into `/var/minecraft`.
 Permissions are set as `0755` or `0644`, and most files are owned by root.
@@ -138,7 +132,7 @@ The container is intended to be run with the main process running as uid `1000` 
 
 The container makes extensive use of layering:
 
-- A base layer, of musl from Debian. Including only the shared library and copyright information.
+- Glibc from Debian.
 - a JRE
 - Your mod loader of choice
 - Each download from the mrpack file, one layer per download 
