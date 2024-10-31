@@ -2,6 +2,7 @@
 
 [![End to End Test](https://github.com/JamesLaverack/mrpack-container/actions/workflows/e2e.yaml/badge.svg?branch=main)](https://github.com/JamesLaverack/mrpack-container/actions/workflows/e2e.yaml)
 [![Lint](https://github.com/JamesLaverack/mrpack-container/actions/workflows/lint.yaml/badge.svg?branch=main)](https://github.com/JamesLaverack/mrpack-container/actions/workflows/lint.yaml)
+[![Rust Report Card](https://rust-reportcard.xuri.me/badge/github.com/jameslaverack/mrpack-container)](https://rust-reportcard.xuri.me/report/github.com/jameslaverack/mrpack-container)
 
 Turn Modrinth modpack (`.mrpack`) files directly into ready-to-use container images.
 
