@@ -298,7 +298,7 @@ async fn main() -> anyhow::Result<()> {
             oci_blob_dir.clone(),
             deb::Package {
                 name: "libc6".to_string(),
-                version: "2.36-9+deb12u9".to_string(),
+                version: "2.36-9+deb12u10".to_string(),
                 arch: *arch,
             },
         ));
