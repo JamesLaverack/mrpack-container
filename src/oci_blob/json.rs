@@ -1,6 +1,6 @@
 use super::LayerBuilderError::{JsonError, NotAJsonMediaType};
 use crate::hash_writer::HashWriterAsync;
-use rand::distributions::{Alphanumeric, DistString};
+use rand::distr::{Alphanumeric, SampleString};
 use serde::Serialize;
 use sha2::Sha256;
 use std::path::{Path, PathBuf};
@@ -24,7 +24,7 @@ impl JsonBlobBuilder {
             return Err(NotAJsonMediaType { media_type });
         }
         let mut filename = ".tmp-".to_owned();
-        filename.push_str(&*Alphanumeric.sample_string(&mut rand::thread_rng(), 16));
+        filename.push_str(&*Alphanumeric.sample_string(&mut rand::rng(), 16));
         filename.push_str(".json");
         let mut tmp_tarfile_path = blob_dir.to_path_buf();
         tmp_tarfile_path.push(filename);

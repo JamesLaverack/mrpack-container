@@ -4,7 +4,7 @@ use async_compression::Level;
 use async_compression::tokio::write::GzipEncoder;
 use digest::Digest;
 use futures_util::TryStreamExt;
-use rand::distributions::{Alphanumeric, DistString};
+use rand::distr::{Alphanumeric, SampleString};
 use sha2::Sha256;
 use std::io;
 use std::io::ErrorKind;
@@ -59,7 +59,7 @@ impl TarLayerBuilder {
         blob_dir: P,
     ) -> Result<TarLayerBuilder, super::LayerBuilderError> {
         let mut filename = ".tmp-".to_owned();
-        filename.push_str(&*Alphanumeric.sample_string(&mut rand::thread_rng(), 16));
+        filename.push_str(&*Alphanumeric.sample_string(&mut rand::rng(), 16));
         filename.push_str(".tar");
         let tmp_tarfile_path = blob_dir.as_ref().join(filename);
         let writer = HashWriterAsync::new_sha256(GzipEncoder::with_quality(
