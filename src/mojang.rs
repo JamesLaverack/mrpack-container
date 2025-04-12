@@ -66,7 +66,11 @@ pub enum ApiError {
     JsonParse { source: serde_json::Error },
     #[error("Requested Minecraft version {version} not found")]
     VersionNotFound { version: String },
-    #[error("Version manifest for version {version} checksum validation failed. Expected {0} but was {1}", hex::encode(expected), hex::encode(actual))]
+    #[error(
+        "Version manifest for version {version} checksum validation failed. Expected {0} but was {1}",
+        hex::encode(expected),
+        hex::encode(actual)
+    )]
     ManifestChecksumFailed {
         version: String,
         expected: [u8; 20],

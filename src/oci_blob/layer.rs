@@ -1,7 +1,7 @@
 use crate::hash_writer;
 use crate::hash_writer::HashWriterAsync;
-use async_compression::tokio::write::GzipEncoder;
 use async_compression::Level;
+use async_compression::tokio::write::GzipEncoder;
 use digest::Digest;
 use futures_util::TryStreamExt;
 use rand::distributions::{Alphanumeric, DistString};

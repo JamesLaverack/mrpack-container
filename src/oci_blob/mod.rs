@@ -38,7 +38,9 @@ impl From<&Blob> for OciDescriptor {
 pub enum LayerBuilderError {
     #[error("Failed to create temporary tar file '{path}' for writing")]
     TmpFileCreation { path: PathBuf, source: io::Error },
-    #[error("Downloaded file '{path}' was an unexpected size. Expected {expected} bytes but was {actual} bytes.")]
+    #[error(
+        "Downloaded file '{path}' was an unexpected size. Expected {expected} bytes but was {actual} bytes."
+    )]
     InvalidSize {
         expected: u64,
         actual: u64,
@@ -53,7 +55,9 @@ pub enum LayerBuilderError {
     },
     #[error("Failed to write to tar file '{path}'")]
     TmpFileWrite { path: PathBuf, source: io::Error },
-    #[error("Failed to rename tar file from temporary name '{from_path}' to final blob name '{to_path}'")]
+    #[error(
+        "Failed to rename tar file from temporary name '{from_path}' to final blob name '{to_path}'"
+    )]
     TmpFileRename {
         from_path: PathBuf,
         to_path: PathBuf,

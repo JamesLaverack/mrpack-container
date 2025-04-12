@@ -1,4 +1,4 @@
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use async_compression::tokio::bufread::GzipDecoder;
 use async_zip::tokio::read::fs::ZipFileReader;
 use clap::Parser;
@@ -20,15 +20,15 @@ use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tracing::{debug, error, info, trace, warn};
 use tracing_subscriber;
 
+use crate::LayerType::{Overrides, ServerOverrides};
 use crate::arch::Architecture;
 use crate::modloaders::{InContainerMinecraftConfig, JavaConfig};
 use crate::oci_blob::{
+    Blob,
     json::JsonBlobBuilder,
     layer::{FileInfo, TarLayerBuilder},
-    Blob,
 };
 use crate::packfile::Dependencies;
-use crate::LayerType::{Overrides, ServerOverrides};
 
 mod adoptium;
 mod arch;
@@ -592,7 +592,9 @@ async fn main() -> anyhow::Result<()> {
         "You still need a file to accept the Minecraft EULA"
     );
 
-    info!("The created container is in OCI format, also known as oci-dir format. Tools that operate only on Docker images won't work. You can convert it into an oci-archive format by compressing the output directory into a tarball.");
+    info!(
+        "The created container is in OCI format, also known as oci-dir format. Tools that operate only on Docker images won't work. You can convert it into an oci-archive format by compressing the output directory into a tarball."
+    );
 
     if container_index.manifests.len() > 1 {
         let names = container_index
@@ -610,7 +612,8 @@ async fn main() -> anyhow::Result<()> {
             .join(", ");
         info!(
             names = names,
-            "This container is a multi-architecture OCI image. You may need to specify the name of the specific architecture you want. The individual images are named with their architectures.")
+            "This container is a multi-architecture OCI image. You may need to specify the name of the specific architecture you want. The individual images are named with their architectures."
+        )
     }
 
     info!("done!");
