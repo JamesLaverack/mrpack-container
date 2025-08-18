@@ -7,7 +7,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: cargo build --release --locked
       - uses: actions/upload-artifact@v4
         with:
@@ -20,7 +20,7 @@ jobs:
       matrix:
         mrpackfile: [quilt-simple.mrpack, fabric-simple.mrpack]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           sparse-checkout: |
             tests/mrpacks
@@ -79,7 +79,7 @@ jobs:
       digest_amd64_3: ${{ steps.digest.outputs.digest_amd64_3 }}
       digest_arm64_3: ${{ steps.digest.outputs.digest_arm64_3 }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           sparse-checkout: |
             tests/mrpacks
