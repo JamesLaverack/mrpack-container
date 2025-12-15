@@ -24,7 +24,7 @@ jobs:
         with:
           sparse-checkout: |
             tests/mrpacks
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: binary
           path: /usr/local/bin
@@ -83,7 +83,7 @@ jobs:
         with:
           sparse-checkout: |
             tests/mrpacks
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: binary
           path: /usr/local/bin
